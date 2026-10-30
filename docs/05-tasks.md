@@ -10,7 +10,7 @@ Dependency graph: **T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7**. Не�
 
 Результат: pyproject/uv.lock, src/pozor, CLI, .env.example, settings, logging redaction, ruff/mypy/pytest, doctor. Точный Python baseline выбрать 3.12 (reference проверяется также локальным 3.13). Doctor проверяет FTS5, writable data directory, config; network checks отдельно флагом.
 
-**Готовая часть T0 — основа приложения и локальный doctor (2026-10-31):** добавлены метаданные и `uv.lock`; пакет `src/pozor`; настройки из окружения/`.env` с маскировкой секретов; `.env.example`; CLI `--help` и `doctor`; проверки FTS5, каталога данных и наличия токена; redaction токенов в логах и traceback. Чистая установка `uv sync --frozen --extra dev`, `pozor --help`, doctor с тестовой конфигурацией, Ruff и mypy прошли. Полный T0 не закрыт: оставлена отдельная проверка существующего offline unit suite.
+**T0 завершён (2026-10-31):** добавлены метаданные и `uv.lock`; пакет `src/pozor`; настройки из окружения/`.env` с маскировкой секретов; `.env.example`; CLI `--help` и `doctor`; проверки FTS5, каталога данных и наличия токена; redaction токенов в логах и traceback. `tests/test_application_basics.py` проверяет defaults/валидацию настроек, локальные проверки doctor и отсутствие секретов в выводе и traceback. Общий offline suite проходит: 31 тест; Ruff для приложения и новых тестов, mypy для пакета, чистая установка `uv sync --frozen --extra dev`, `pozor --help` и doctor с тестовой конфигурацией проверены. Реальные Telegram, сеть и GPU не требуются.
 
 Приёмка: чистый install по lock, `pozor --help`, missing token понятен без печати token; unit suite работает offline. Не реализовывать Telegram, LLM или schema «на глаз» в этом пакете.
 
