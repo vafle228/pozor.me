@@ -71,6 +71,112 @@ def _flatten_text(message: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _entity_text(text: str, offset: int, length: int) -> str | None:
+    """Slice Telegram entity offsets, which are measured in UTF-16 code units."""
+    if offset < 0 or length < 1:
+        return None
+    encoded = text.encode("utf-16-le")
+    start, end = offset * 2, (offset + length) * 2
+    if end > len(encoded):
+        return None
+    try:
+        return encoded[start:end].decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+
+def _mentioned_user_ids(
+    connection: sqlite3.Connection,
+    message: Mapping[str, Any],
+    text: str,
+    chat_id: int,
+    occurred_at: str,
+) -> set[int]:
+    entities = message.get("entities")
+    if entities is None:
+        entities = message.get("caption_entities")
+    if not isinstance(entities, list):
+        return set()
+
+    user_ids: set[int] = set()
+    for entity in entities:
+        if not isinstance(entity, Mapping):
+            continue
+        if entity.get("type") == "text_mention":
+            user = entity.get("user")
+            user_id = user.get("id") if isinstance(user, Mapping) else None
+            if isinstance(user_id, int) and not isinstance(user_id, bool):
+                user_ids.add(user_id)
+            continue
+        if entity.get("type") != "mention":
+            continue
+        offset, length = entity.get("offset"), entity.get("length")
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            continue
+        if isinstance(length, bool) or not isinstance(length, int):
+            continue
+        username = _entity_text(text, offset, length)
+        if username is None or not username.startswith("@"):
+            continue
+        rows = connection.execute(
+            """SELECT DISTINCT user_id FROM aliases
+               WHERE chat_id = ? AND username = ? COLLATE NOCASE
+                 AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)""",
+            (chat_id, username[1:], occurred_at, occurred_at),
+        ).fetchall()
+        if len(rows) == 1:
+            user_ids.add(rows[0]["user_id"])
+    return user_ids
+
+
+def _upsert_subjects(
+    connection: sqlite3.Connection,
+    message_id: int,
+    *,
+    chat_id: int,
+    message: Mapping[str, Any],
+    text: str,
+    author_id: int | None,
+    occurred_at: str,
+) -> set[int]:
+    """Rebuild live attribution links and return all affected target IDs."""
+    previous = connection.execute(
+        "SELECT target_id FROM message_subjects WHERE message_id = ?", (message_id,)
+    ).fetchall()
+    affected = {row["target_id"] for row in previous}
+    connection.execute("DELETE FROM message_subjects WHERE message_id = ?", (message_id,))
+
+    relations: set[tuple[int, str, str]] = set()
+    if author_id is not None:
+        relations.add((author_id, "self", "observed_self"))
+    for target_id in _mentioned_user_ids(connection, message, text, chat_id, occurred_at):
+        if target_id != author_id:
+            relations.add((target_id, "mention", "third_party"))
+
+    reply = message.get("reply_to_message")
+    if isinstance(reply, Mapping):
+        reply_chat = reply.get("chat")
+        parent_chat_id = reply_chat.get("id") if isinstance(reply_chat, Mapping) else chat_id
+        parent_id = reply.get("message_id")
+        if parent_chat_id == chat_id and isinstance(parent_id, int) and not isinstance(parent_id, bool):
+            parent = connection.execute(
+                """SELECT author_id FROM messages
+                   WHERE scope_chat_id = ? AND source_namespace = ? AND source_message_id = ?""",
+                (chat_id, f"live:{chat_id}", parent_id),
+            ).fetchone()
+            if parent is not None and parent["author_id"] is not None and parent["author_id"] != author_id:
+                relations.add((parent["author_id"], "reply", "third_party"))
+
+    for target_id, relation, attribution in relations:
+        connection.execute(
+            """INSERT INTO message_subjects(message_id, target_id, relation, attribution)
+               VALUES (?, ?, ?, ?)""",
+            (message_id, target_id, relation, attribution),
+        )
+        affected.add(target_id)
+    return affected
+
+
 def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -> None:
     selected = _message_from_payload(payload)
     if selected is None:
@@ -107,6 +213,7 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
         (namespace, message_id),
     ).fetchone()
 
+    message_row_id: int
     if existing is None:
         connection.execute(
             """INSERT INTO messages
@@ -115,7 +222,17 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'live')""",
             (chat_id, namespace, message_id, thread_id, author_id, text, text_hash, date),
         )
-    elif is_edit or existing["text_hash"] != text_hash:
+        inserted = connection.execute(
+            "SELECT id FROM messages WHERE source_namespace = ? AND source_message_id = ?",
+            (namespace, message_id),
+        ).fetchone()
+        assert inserted is not None
+        message_row_id = inserted["id"]
+    else:
+        message_row_id = existing["id"]
+
+    should_rebuild_subjects = existing is None or is_edit or existing["text_hash"] != text_hash
+    if existing is not None and (is_edit or existing["text_hash"] != text_hash):
         # A repeated Bot API update is idempotent. An edit replaces the canonical
         # body and the FTS trigger updates the index in the same transaction.
         edited_at = datetime.now(UTC).isoformat(timespec="seconds")
@@ -125,15 +242,23 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
                WHERE id = ?""",
             (thread_id, author_id, text, text_hash, date, edited_at, existing["id"]),
         )
-        affected = connection.execute(
-            "SELECT DISTINCT target_id FROM message_subjects WHERE message_id = ?", (existing["id"],)
-        ).fetchall()
-        for row in affected:
-            connection.execute(
-                """INSERT INTO data_epochs(chat_id, target_id, epoch) VALUES (?, ?, 1)
-                   ON CONFLICT(chat_id, target_id) DO UPDATE SET epoch = epoch + 1""",
-                (chat_id, row["target_id"]),
-            )
+    if should_rebuild_subjects:
+        affected = _upsert_subjects(
+            connection,
+            message_row_id,
+            chat_id=chat_id,
+            message=message,
+            text=text,
+            author_id=author_id,
+            occurred_at=date,
+        )
+        if existing is not None:
+            for target_id in affected:
+                connection.execute(
+                    """INSERT INTO data_epochs(chat_id, target_id, epoch) VALUES (?, ?, 1)
+                       ON CONFLICT(chat_id, target_id) DO UPDATE SET epoch = epoch + 1""",
+                    (chat_id, target_id),
+                )
 
     connection.execute(
         """INSERT INTO members(chat_id, user_id, display_name, current_username, last_seen)
