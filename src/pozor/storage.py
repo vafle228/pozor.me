@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from pathlib import Path
-from typing import Final
+from types import TracebackType
+from typing import Final, Literal
 
 MIGRATIONS_DIR: Final = Path(__file__).with_name("migrations")
 _MIGRATIONS_TABLE = "schema_migrations"
@@ -15,11 +16,26 @@ class MigrationError(RuntimeError):
     """Raised when the database schema cannot be safely advanced."""
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Make the standard sqlite context-manager syntax release file handles."""
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect(database_path: Path) -> sqlite3.Connection:
     """Open a configured database connection, creating its parent directory."""
     path = database_path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=5.0)
+    connection = sqlite3.connect(path, timeout=5.0, factory=_ClosingConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 5000")
