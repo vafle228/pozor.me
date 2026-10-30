@@ -16,6 +16,8 @@ Dependency graph: **T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7**. Не�
 
 ## T1 — БД и durable ingestion
 
+**Готовая часть T1 — SQLite-схема и checksum-защищённые миграции (2026-10-31):** создана первая миграция для чатов, участников/aliases, inbox/checkpoint, нормализованных сообщений, связей subjects, data epochs и FTS5 с триггерами. Добавлена настройка SQLite-соединения (foreign keys, WAL, busy timeout) и команда `pozor db migrate`; повторный запуск идемпотентен, изменение уже применённого SQL отклоняется. Durable receiver, транзакционная обработка inbox, allowlist, edits и lifecycle обработки остаются открытыми частями T1.
+
 Результат: миграции/репозитории по doc02, inbox/checkpoint transaction, message normalization, FTS triggers, receiver через aiogram client, allowlist, edit handling, restart behavior. Anonymous sender не привязывается к target. Chat migration group→supergroup требует атомарного переноса scope/aliases/consent и индексов либо явной блокировки с инструкцией миграции — не терять identity молча.
 
 Приёмка: повтор update не дублирует message; crash before commit получает update заново; crash after commit не теряет processing; edit заменяет FTS и инвалидирует cards; сообщения чужого чата недоступны; receiver не ждёт GPU. Mock getUpdates проверяет offsets, webhook conflict и retry backoff. Старые сообщения сохраняются, но не исполняют команды.

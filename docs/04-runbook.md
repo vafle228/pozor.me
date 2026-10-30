@@ -56,7 +56,7 @@ uv run pozor benchmark --suite tests/fixtures/eval.jsonl --repeat 3
 uv run pozor run
 ```
 
-Сейчас реализованы `pozor --help` и локальный `pozor doctor`; команды `db migrate`, `llm smoke`, `benchmark` и `run` — последующие пакеты плана. Запуск и диагностика не скачивают веса автоматически.
+Сейчас реализованы `pozor --help`, локальный `pozor doctor` и первичная SQLite-миграция `pozor db migrate`; команды `llm smoke`, `benchmark` и `run` — последующие пакеты плана. Запуск и диагностика не скачивают веса автоматически.
 
 ## 4. Подключение группы и импорт
 
