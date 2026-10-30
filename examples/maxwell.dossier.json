@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "target_user_id": 123456789,
+  "items": [
+    {
+      "id": "reddit-streak",
+      "kind": "operator_note",
+      "text": "600 дней подряд заходит в Reddit",
+      "occurred_at": null,
+      "source_label": "Ручная вводная инициатора; не подтверждено сообщениями",
+      "source_url": null
+    },
+    {
+      "id": "game-quote",
+      "kind": "pasted_quote",
+      "text": "И я устрою полный трахау",
+      "occurred_at": "2026-10-30T23:37:00+05:00",
+      "source_label": "Вставленная цитата из примера, предоставленного пользователем",
+      "source_url": null
+    }
+  ]
+}
