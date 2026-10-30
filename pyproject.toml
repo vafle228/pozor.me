@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pozor-me"
+version = "0.1.0"
+description = "Локальный Telegram-бот для контекстной прожарки в группе"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "aiogram>=3.22,<4",
+    "aiosqlite>=0.21,<1",
+    "httpx>=0.28,<1",
+    "pydantic-settings>=2.10,<3",
+    "typer>=0.16,<1",
+]
+
+[project.optional-dependencies]
+imports = ["ijson>=3.4,<4"]
+dev = ["mypy>=1.17,<2", "pytest>=8.4,<9", "pytest-asyncio>=1.1,<2", "ruff>=0.12,<1"]
+
+[project.scripts]
+pozor = "pozor.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pozor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["pozor"]

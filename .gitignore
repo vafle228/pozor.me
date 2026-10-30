@@ -5,6 +5,7 @@
 
 # Python environments and bytecode
 .venv/
+.uv-cache/
 venv/
 env/
 __pycache__/
