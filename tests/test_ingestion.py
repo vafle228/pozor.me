@@ -1,9 +1,21 @@
+import asyncio
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from pozor.ingestion import current_offset, poll_once, process_pending
+from pozor.ingestion import (
+    ChatMigrationConflict,
+    PollingConflictError,
+    _persist_batch,
+    cleanup_expired_live_data,
+    current_offset,
+    poll_once,
+    process_pending,
+    run_poller,
+    sync_chat_allowlist,
+)
 from pozor.storage import connect, migrate
 
 
@@ -47,7 +59,7 @@ def db_path() -> Path:
         path = Path(directory) / "test.sqlite3"
         migrate(path)
         with connect(path) as connection:
-            connection.execute("INSERT INTO chats(chat_id, enabled) VALUES (-1001, 1)")
+            connection.execute("INSERT INTO chats(chat_id, allowed, enabled) VALUES (-1001, 1, 1)")
         yield path
 
 
@@ -60,8 +72,34 @@ def test_poll_persists_updates_and_offset_before_next_fetch(db_path: Path) -> No
     assert current_offset(db_path, 999) == 101
     assert source.calls[0]["offset"] is None
     assert source.calls[0]["allowed_updates"] == [
-        "message", "edited_message", "channel_post", "edited_channel_post"
+        "message", "edited_message", "channel_post", "edited_channel_post", "callback_query"
     ]
+
+
+def test_disabled_chat_inbox_accepts_only_control_commands(db_path: Path) -> None:
+    with connect(db_path) as connection:
+        connection.execute("UPDATE chats SET enabled=0 WHERE chat_id=-1001")
+    plain = _message_update(201, text="private conversation content")
+    command = _message_update(202, text="/enable_chat")
+    command["message"]["entities"] = [{"type": "bot_command", "offset": 0, "length": 12}]
+    _persist_batch(db_path, 999, [plain, command])
+    with connect(db_path) as connection:
+        rows = connection.execute("SELECT update_id FROM inbox ORDER BY update_id").fetchall()
+    assert [row["update_id"] for row in rows] == [202]
+
+
+def test_committed_inbox_update_survives_restart_before_processing(db_path: Path) -> None:
+    _persist_batch(db_path, 999, [_message_update(100)])
+    assert current_offset(db_path, 999) == 101
+    with connect(db_path) as connection:
+        assert connection.execute("SELECT processed_at FROM inbox WHERE update_id = 100").fetchone()[0] is None
+        assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+
+    # A restarted process drains the durable inbox without asking Telegram for the update again.
+    assert process_pending(db_path) == 1
+    with connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        assert connection.execute("SELECT normalized_payload FROM inbox WHERE update_id = 100").fetchone()[0] == ""
 
 
 def test_duplicate_update_does_not_duplicate_message(db_path: Path) -> None:
@@ -216,3 +254,157 @@ def test_edit_does_not_leak_raw_text_into_logging(db_path: Path, caplog) -> None
     source = FakeSource([_message_update(100, text="synthetic private text")])
     _run_immediate(poll_once(source, db_path, 999))
     assert "synthetic private text" not in caplog.text
+
+
+def test_allowlist_sync_never_enables_a_chat_and_rejects_others(db_path: Path) -> None:
+    sync_chat_allowlist(db_path, [-1001, -3003])
+    with connect(db_path) as connection:
+        connection.execute("UPDATE chats SET enabled = 1 WHERE chat_id = -1001")
+    sync_chat_allowlist(db_path, [-3003])
+
+    with connect(db_path) as connection:
+        rows = connection.execute("SELECT chat_id, allowed, enabled FROM chats ORDER BY chat_id").fetchall()
+    assert [tuple(row) for row in rows] == [(-3003, 1, 0), (-1001, 0, 1)]
+
+    source = FakeSource([_message_update(100, chat_id=-1001, text="outside allowlist")])
+    _run_immediate(poll_once(source, db_path, 999))
+    with connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert connection.execute("SELECT normalized_payload FROM inbox").fetchone() is None
+
+
+def test_group_to_supergroup_migration_moves_scope_atomically(db_path: Path) -> None:
+    with connect(db_path) as connection:
+        connection.execute("UPDATE chats SET chat_id = -1 WHERE chat_id = -1001")
+        connection.execute("INSERT INTO members(chat_id, user_id) VALUES (-1, 77)")
+        connection.execute(
+            """INSERT INTO aliases(chat_id, user_id, username, valid_from, source)
+               VALUES (-1, 77, 'sam', '2026-01-01T00:00:00Z', 'observed')"""
+        )
+        connection.execute("INSERT INTO data_epochs(chat_id, target_id, epoch) VALUES (-1, 77, 4)")
+        connection.execute(
+            """INSERT INTO sessions(id,chat_id,thread_id,target_id,initiator_id,state,created_at,trigger_message_id)
+               VALUES ('migration_12345678',-1,3,77,88,'active',100,5)"""
+        )
+        connection.execute(
+            "INSERT INTO command_cooldowns(chat_id,user_id,kind,until_at) VALUES (-1,77,'target',700)"
+        )
+    _persist_batch(db_path, 999, [_message_update(100, chat_id=-1, message_id=10)])
+    process_pending(db_path)
+    transition = _message_update(101, chat_id=-1, message_id=11)
+    transition["message"]["migrate_to_chat_id"] = -1001
+    _persist_batch(db_path, 999, [transition])
+    process_pending(db_path)
+
+    with connect(db_path) as connection:
+        chats = connection.execute("SELECT chat_id, allowed, enabled FROM chats").fetchall()
+        messages = connection.execute(
+            "SELECT scope_chat_id, source_namespace, source_message_id FROM messages"
+        ).fetchall()
+        member = connection.execute("SELECT chat_id, user_id FROM members WHERE user_id = 77").fetchone()
+        alias = connection.execute("SELECT chat_id, user_id FROM aliases WHERE username = 'sam'").fetchone()
+        epoch = connection.execute(
+            "SELECT chat_id, target_id, epoch FROM data_epochs WHERE target_id = 77"
+        ).fetchone()
+        session = connection.execute("SELECT chat_id,thread_id FROM sessions WHERE id='migration_12345678'").fetchone()
+        cooldown = connection.execute("SELECT chat_id,user_id FROM command_cooldowns").fetchone()
+    assert [tuple(row) for row in chats] == [(-1001, 1, 1)]
+    assert [tuple(row) for row in messages] == [(-1001, "live:-1001", 10)]
+    assert tuple(member) == (-1001, 77)
+    assert tuple(alias) == (-1001, 77)
+    assert tuple(epoch) == (-1001, 77, 4)
+    assert tuple(session) == (-1001, 3)
+    assert tuple(cooldown) == (-1001, 77)
+
+
+def test_migration_merges_configured_empty_destination_placeholder(db_path: Path) -> None:
+    with connect(db_path) as connection:
+        connection.execute("UPDATE chats SET chat_id = -1 WHERE chat_id = -1001")
+    sync_chat_allowlist(db_path, [-1001])
+    transition = _message_update(100, chat_id=-1, message_id=11)
+    transition["message"]["migrate_to_chat_id"] = -1001
+    _persist_batch(db_path, 999, [transition])
+    process_pending(db_path)
+
+    with connect(db_path) as connection:
+        chat = connection.execute("SELECT chat_id, allowed, enabled FROM chats").fetchone()
+    assert tuple(chat) == (-1001, 1, 1)
+
+
+def test_chat_migration_collision_rolls_back_inbox_and_scope(db_path: Path) -> None:
+    with connect(db_path) as connection:
+        connection.execute("INSERT INTO chats(chat_id, allowed, enabled) VALUES (-2002, 1, 1)")
+    transition = _message_update(100, chat_id=-1001)
+    transition["message"]["migrate_to_chat_id"] = -2002
+    _persist_batch(db_path, 999, [transition])
+    with pytest.raises(ChatMigrationConflict, match="operator reconciliation"):
+        process_pending(db_path)
+
+    with connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM chats WHERE chat_id = -1001").fetchone()[0] == 1
+        assert connection.execute("SELECT processed_at FROM inbox").fetchone()[0] is None
+
+
+def test_cleanup_deletes_expired_live_rows_and_invalidates_epochs(db_path: Path) -> None:
+    old = _message_update(100, message_id=50, text="expired text")
+    old["message"]["date"] = 1
+    _persist_batch(db_path, 999, [old])
+    process_pending(db_path)
+    with connect(db_path) as connection:
+        connection.execute(
+            "UPDATE inbox SET received_at = '2020-01-01T00:00:00Z' WHERE update_id = 100"
+        )
+
+    deleted_messages, deleted_inbox = cleanup_expired_live_data(
+        db_path, now=datetime(2026, 10, 31, tzinfo=UTC)
+    )
+    assert (deleted_messages, deleted_inbox) == (1, 1)
+    with connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0] == 0
+        assert tuple(connection.execute("SELECT target_id, epoch FROM data_epochs").fetchone()) == (42, 1)
+
+
+def test_polling_conflict_is_actionable_and_not_retried(db_path: Path) -> None:
+    class ConflictSource:
+        calls = 0
+
+        async def get_updates(self, *, offset, timeout, allowed_updates):
+            self.calls += 1
+            raise PollingConflictError("active webhook")
+
+    source = ConflictSource()
+    with pytest.raises(PollingConflictError, match="active webhook"):
+        _run_immediate(run_poller(source, db_path, 999))
+    assert source.calls == 1
+
+
+def test_retry_backoff_is_bounded_and_stoppable(db_path: Path, monkeypatch) -> None:
+    from pozor import ingestion
+
+    delays: list[float] = []
+    stop = asyncio.Event()
+    original_wait_for = asyncio.wait_for
+
+    async def capture_wait_for(awaitable, *, timeout):
+        delays.append(timeout)
+        if len(delays) < 3:
+            awaitable.close()
+            raise TimeoutError
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    class FlakySource:
+        calls = 0
+
+        async def get_updates(self, *, offset, timeout, allowed_updates):
+            self.calls += 1
+            if self.calls < 3:
+                raise OSError("offline synthetic source")
+            stop.set()
+            return []
+
+    monkeypatch.setattr(ingestion.asyncio, "wait_for", capture_wait_for)
+    source = FlakySource()
+    _run_immediate(run_poller(source, db_path, 999, retry_delay=0.5, max_retry_delay=0.75, stop_event=stop))
+    assert delays == [0.5, 0.75]
+    assert source.calls == 3

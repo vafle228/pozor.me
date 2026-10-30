@@ -7,8 +7,8 @@ tokenization, and provenance. All integer times below are UTC Unix seconds.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping, Sequence
 
 
 def utf16_slice(text: str, offset: int, length: int) -> str:
@@ -59,7 +59,7 @@ class ImportRow:
 
 
 def select_export(
-    messages: Sequence[Mapping],
+    messages: Iterable[Mapping[str, object]],
     *,
     target_id: int,
     since: int,
@@ -77,7 +77,7 @@ def select_export(
     """
     if target_id <= 0 or since >= until or neighbors not in (0, 1):
         raise ValueError("Invalid selection")
-    indexed: dict[int, tuple[Mapping, int, str]] = {}
+    indexed: dict[int, tuple[Mapping[str, object], int, str]] = {}
     for message in messages:
         if message.get("type") != "message":
             continue
@@ -90,7 +90,7 @@ def select_export(
         if isinstance(timestamp, bool) or not re.fullmatch(r"[0-9]+", str(timestamp)):
             raise ValueError("Require normalized UTC date_unixtime")
         text = flatten_text(message.get("text", ""))
-        indexed[mid] = (message, int(timestamp), text)
+        indexed[mid] = (message, int(str(timestamp)), text)
 
     ordered = sorted(indexed, key=lambda mid: (indexed[mid][1], mid))
 
@@ -102,7 +102,7 @@ def select_export(
             and (selected_ids is None or mid in selected_ids)
         )
 
-    def mentioned(message: Mapping, timestamp: int) -> bool:
+    def mentioned(message: Mapping[str, object], timestamp: int) -> bool:
         fragments = message.get("text_entities")
         if fragments is None:
             text = message.get("text", [])

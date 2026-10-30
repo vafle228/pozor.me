@@ -39,7 +39,7 @@
 
 1. Target написал боту/в группе хотя бы один раз; `/whois` reply показывает числовой ID и chat ID. Если ещё неизвестен — импорт можно подготовить в staging по явно заданному ID, использовать только после подтверждения live identity. Не сопоставлять по display name.
 2. В Telegram Desktop экспортировать нужный чат в JSON. Не экспортировать медиа. Локально передать файл CLI; в V1 не делать Telegram upload произвольных архивов.
-3. Запустить будущую команду preview:
+3. Запустить локальную команду preview:
 
 ```powershell
 uv run pozor import preview --file .\imports\result.json --format telegram-desktop --source-chat 123456 --chat -1001234567890 --target 123456789 --from 2026-09-01 --until 2026-11-01 --timezone Asia/Yekaterinburg
@@ -52,6 +52,8 @@ uv run pozor import preview --file .\imports\result.json --format telegram-deskt
 6. `uv run pozor import apply --manifest .\data\staging\<batch>.json` проверяет hash, ID, allowlist, identity и policy заново, затем транзакционно применяет. При изменении файла нужен новый preview. Apply реализует идемпотентность; повторный запуск не удваивает строки. Большой import — staging chunks, атомарная активация batch только после полной загрузки.
 7. `uv run pozor profile show --chat ... --target ...` показывает доступные темы с происхождением. Профиль не обязан ждать LLM: импортированные цитаты доступны retrieval сразу. До первого вызова желательно закончить фоновую индексацию.
 8. `uv run pozor import rollback --batch <id>` удаляет привязки batch и производные карточки; общие сообщения из других batch/live не уничтожает.
+
+Для файлов больше 8 MiB установите optional extra `imports` (`uv sync --extra imports`); предел остаётся 100 MiB. В Windows для IANA timezone вроде `Asia/Yekaterinburg` также нужен пакет `tzdata`; без него preview завершится понятной ошибкой. UTC работает без timezone database.
 
 Ручной ввод: `import preview --format dossier-v1 --file .\imports\maxwell.json --chat ... --target ...`. ID в файле должен совпасть с CLI. Изменение досье = новая ревизия batch, не незаметное обновление старого факта.
 
@@ -74,7 +76,7 @@ uv run pozor import preview --file .\imports\result.json --format telegram-deskt
 
 | Таблица | Ключи и важные поля |
 |---|---|
-| `chats` | chat_id PK, enabled, policy_version, retention_days |
+| `chats` | chat_id PK, allowed (configured allowlist), enabled (operator/admin switch), policy_version, retention_days |
 | `members` | PK(chat_id,user_id), display_name, current_username, last_seen, consent, consent_version, opt_out |
 | `aliases` | chat_id,user_id,username,valid_from,valid_to,source; неоднозначные интервалы не резолвить |
 | `inbox` | update_id PK, normalized payload, received_at, processed_at; краткое хранение |
