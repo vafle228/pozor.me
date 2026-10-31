@@ -323,6 +323,8 @@ async def test_stop_during_external_send_records_success_but_no_next_turn(scope)
 
 @pytest.mark.asyncio
 async def test_offline_http_generator_to_production_sender(scope, tmp_path):
+    from pozor.operations import backup, restore
+
     p, db, _, bot, _ = scope
     imported(db, tmp_path)
     paths = []
@@ -347,13 +349,33 @@ async def test_offline_http_generator_to_production_sender(scope, tmp_path):
     async with LlamaClient(p.settings, transport=httpx.MockTransport(handler)) as client:
         p.generator = Generator(client)
         p.queue = InferenceQueue(client.wait_idle)
-        start(scope)
+        sid = start(scope)
         await generated(p)
         await p.send_once()
         assert "/v1/chat/completions" in paths
         assert state(db)[0]["status"] == "sent"
         assert "загружается" in bot.calls[0]["text"]
         await p.aclose()
+        # T7: actual import + HTTP adapter + sender state survives backup/restore.
+        snapshot = backup(db, tmp_path / 'snapshots')
+        restored = tmp_path / 'restored.sqlite3'
+        restore(snapshot, restored)
+        restarted = DeliveryPipeline(restored, p.settings, bot, Generator(client),
+                                     InferenceQueue(client.wait_idle))
+        try:
+            restarted.ready = True
+            assert not restarted.accept(sid, 2, 'игра reddit', first=True)
+            assert not await restarted.send_once()
+            assert len(bot.calls) == 1
+            assert state(restored)[0]['status'] == 'sent'
+            assert state(restored, 'sessions')[0]['closed_reason'] == 'restart'
+            with connect(restored) as con:
+                assert con.execute("SELECT count(*) FROM messages_fts "
+                                   "WHERE messages_fts MATCH 'reddit'").fetchone()[0] == 1
+                assert con.execute("SELECT count(*) FROM imports "
+                                   "WHERE status='active'").fetchone()[0] == 1
+        finally:
+            await restarted.aclose()
 
 
 @pytest.mark.asyncio

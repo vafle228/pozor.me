@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import uuid
 from pathlib import Path
 
@@ -27,6 +28,71 @@ llm_app = typer.Typer(help="Opt-in диагностика локального l
 app.add_typer(llm_app, name="llm")
 profile_app = typer.Typer(help="Локальные карточки с исходными цитатами")
 app.add_typer(profile_app, name="profile")
+deployment_app = typer.Typer(help="Offline проверка закреплённых артефактов")
+app.add_typer(deployment_app, name="deployment")
+
+
+@deployment_app.command("check")
+def deployment_check(
+    lock: Path = typer.Option(Path('deployment-lock.json')),  # noqa: B008
+    model: Path = typer.Option(...),  # noqa: B008
+    server: Path = typer.Option(...),  # noqa: B008
+) -> None:
+    """Hash existing files and check runtime identity; no network or model launch."""
+    from pozor.deployment import check_artifacts
+    from pozor.operations import OperationsError
+
+    try:
+        check_artifacts(lock, model, server, Settings())
+    except (ValidationError, OperationsError, OSError):
+        typer.echo("FAIL deployment: incomplete lock, runtime mismatch or wrong artifacts", err=True)
+        raise typer.Exit(1) from None
+    typer.echo("OK artifact identity; GPU, live smoke and human quality gates remain separate")
+
+
+@app.command("status")
+def operation_status() -> None:
+    """Offline snapshot of durable counters, without chat text or credentials."""
+    from pozor.operations import OperationsError, status
+
+    try:
+        result = status(Settings().database_path)
+    except (ValidationError, OperationsError, OSError, sqlite3.Error):
+        typer.echo("FAIL status: check configuration, database and schema version", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(json.dumps(result, indent=2))
+
+
+@db_app.command("backup")
+def db_backup(
+    directory: Path = typer.Option(..., help="Private backup directory"),  # noqa: B008
+    retention_days: int = typer.Option(7, min=1),
+) -> None:
+    """SQLite online backup with integrity/FTS checks and snapshot rotation."""
+    from pozor.operations import OperationsError, backup
+
+    try:
+        path = backup(Settings().database_path, directory, retention_days=retention_days)
+    except (ValidationError, OperationsError, OSError, sqlite3.Error):
+        typer.echo("FAIL backup: check paths, permissions, schema and database integrity", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"OK backup: {path.name}")
+
+
+@db_app.command("restore")
+def db_restore(
+    source: Path = typer.Option(..., exists=True, dir_okay=False),  # noqa: B008
+    destination: Path = typer.Option(...),  # noqa: B008
+) -> None:
+    """Restore to a NEW path; original files stay intact, pending delivery is cancelled."""
+    from pozor.operations import OperationsError, restore
+
+    try:
+        restore(source, destination)
+    except (OperationsError, OSError, sqlite3.Error):
+        typer.echo("FAIL restore: need a new path and a valid matching-schema snapshot", err=True)
+        raise typer.Exit(1) from None
+    typer.echo("OK restore: validated; saved sessions closed, no pending punch will resume")
 
 
 @profile_app.command("show")

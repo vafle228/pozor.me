@@ -2,6 +2,10 @@
   "schema_version": 1,
   "status": "unverified_baseline",
   "llama_cpp_build": null,
+  "llama_cpp_artifact": {
+    "filename": null,
+    "sha256": null
+  },
   "model": {
     "repo": "Qwen/Qwen3-8B-GGUF",
     "revision": null,
@@ -21,5 +25,12 @@
     "gpu": null,
     "backend": null,
     "latency": null
+  },
+  "acceptance": {
+    "t6_human_quality": "pending",
+    "gpu_offload_and_slot_release": "pending",
+    "latency_concurrency_vram": "pending",
+    "telegram_test_group": "not_run",
+    "windows_supervisor": "not_run"
   }
 }

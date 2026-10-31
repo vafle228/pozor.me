@@ -13,10 +13,10 @@
 
 Пиновать проверенные версии, llama.cpp build SHA/release, model repo+revision+filename+SHA256 в `deployment-lock.json`. Не выдумывать lockfile в плане; собрать и проверить в T0/T4. Не скачивать случайные GGUF «uncensored» как решение качества.
 
-## 3. Последовательность будущего запуска
+## 3. Последовательность запуска Windows
 
 ```powershell
-uv sync --frozen
+uv sync --frozen --extra imports --extra dev
 Copy-Item .env.example .env
 # Заполнить .env локально, не присылать токен в чат и не коммитить.
 uv run pozor doctor
@@ -52,7 +52,8 @@ $env:LLAMA_ARG_CHAT_TEMPLATE_KWARGS = '{"enable_thinking":false}'
 
 ```powershell
 uv run pozor llm smoke
-uv run pozor benchmark --suite tests/fixtures/eval.jsonl --repeat 3
+uv run pozor benchmark --suite tests/fixtures/eval.jsonl --output data/offline-eval.json
+# Только при готовой модели: добавить --live --repeat 3 для замера генерации.
 uv run pozor run
 ```
 
@@ -75,6 +76,12 @@ llama-server слушает localhost. Если позже приложение 
 Graceful shutdown: остановить intake → сохранить checkpoint → закрыть pending сессии/отменить jobs → ограниченно дождаться sender → закрыть DB/HTTP. После рестарта старые active sessions закрыть `restart`, не продолжать вчерашнюю прожарку. Updates старше 30 секунд архивировать при соблюдении retention, но команды/продолжения из них не запускать. Время future >30 секунд — reject trigger как clock anomaly; message всё равно можно сохранить после проверки даты.
 
 Backup через SQLite backup API, не копированием живого одного .sqlite без WAL. Ротация 7 дней, owner-only ACL, restore smoke на отдельный путь. Экспорты не помещать в обычные логи/репозиторий. Следить за ростом DB, удалением staging, свободным диском.
+
+Реализованные команды backup/restore, private ACL, Windows Scheduled Tasks и
+systemd samples, пошаговый final smoke и фактические ограничения:
+[эксплуатационный пакет T7](09-t7-operations.md). `status` показывает snapshot
+счётчиков БД, но не доказывает, что процессы живы или GPU готова. Heartbeat,
+полный набор перечисленных ниже метрик и файловая ротация логов не реализованы.
 
 ## 6. Наблюдаемость
 
