@@ -1,4 +1,4 @@
-"""Local, authenticated, read-only administration: python -m pozor.admin."""
+"""Local authenticated administration and optional Telegram history pipeline."""
 
 from __future__ import annotations
 
@@ -15,9 +15,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from pozor.admin_pipeline import AdminPipeline
 from pozor.config import Settings
 from pozor.context import sources_current
 from pozor.llm import SYSTEM
+from pozor.telegram_account import AccountError
 
 STATIC = Path(__file__).with_name("admin_static")
 
@@ -85,7 +87,7 @@ class AdminData:
 
 
 def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
-                port: int = 8090) -> ThreadingHTTPServer:
+                port: int = 8090, pipeline: AdminPipeline | None = None) -> ThreadingHTTPServer:
     if len(password) < 16:
         raise ValueError("ADMIN_PASSWORD должен содержать минимум 16 символов")
     key = secrets.token_bytes(32)
@@ -123,9 +125,10 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
-            if parsed.path in ("/", "/app.js", "/style.css"):
+            if parsed.path in ("/", "/app.js", "/pipeline.js", "/style.css"):
                 filename, mime = {"/": ("index.html", "text/html"),
                                   "/app.js": ("app.js", "text/javascript"),
+                                  "/pipeline.js": ("pipeline.js", "text/javascript"),
                                   "/style.css": ("style.css", "text/css")}[parsed.path]
                 self.reply(200, (STATIC / filename).read_bytes(), mime)
                 return
@@ -133,8 +136,20 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                 self.reply(401, b'{"error":"authentication_required"}')
                 return
             try:
-                result = data.read(parsed.path, parse_qs(parsed.query))
+                if parsed.path.startswith("/api/telegram/"):
+                    if pipeline is None:
+                        raise AccountError("Подключение Telegram недоступно в этом запуске.")
+                    action = parsed.path.rsplit("/", 1)[-1]
+                    if action not in {"status", "groups", "members", "job"}:
+                        raise LookupError
+                    query = parse_qs(parsed.query)
+                    result = pipeline.call(action, {"chat": query["chat"][0]}
+                                           if action == "members" else {})
+                else:
+                    result = data.read(parsed.path, parse_qs(parsed.query))
                 self.reply(200, json.dumps(result, ensure_ascii=False).encode())
+            except AccountError as exc:
+                self.reply(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode())
             except (ValueError, KeyError, IndexError):
                 self.reply(400, b'{"error":"invalid_query"}')
             except LookupError:
@@ -152,19 +167,42 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                 self.reply(200, b'{}', cookie="pozor_admin=; Path=/; HttpOnly; "
                            "SameSite=Strict; Max-Age=0")
                 return
-            if self.path != "/api/login":
+            telegram = self.path.startswith("/api/telegram/")
+            if telegram and not self.authenticated():
+                self.reply(401, b'{"error":"authentication_required"}')
+                return
+            if self.path != "/api/login" and not telegram:
                 self.reply(404, b'{}')
                 return
             try:
                 size = int(self.headers.get("Content-Length", "0"))
-                if not 0 < size <= 4096:
+                if not 0 < size <= 16384:
                     raise ValueError
                 body = json.loads(self.rfile.read(size))
+                if telegram:
+                    if (not isinstance(body, dict) or self.headers.get_content_type()
+                            != "application/json"):
+                        raise ValueError
+                    if pipeline is None:
+                        raise AccountError("Подключение Telegram недоступно в этом запуске.")
+                    action = self.path.rsplit("/", 1)[-1]
+                    if action not in {"connect", "password", "disconnect", "start", "cancel", "save"}:
+                        self.reply(404, b'{}')
+                        return
+                    result = pipeline.call(action, body)
+                    self.reply(200, json.dumps(result, ensure_ascii=False).encode())
+                    return
                 supplied = body.get("password") if isinstance(body, dict) else None
                 if not isinstance(supplied, str):
                     raise TypeError
-            except (ValueError, TypeError):
+            except AccountError as exc:
+                self.reply(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode())
+                return
+            except (ValueError, TypeError, KeyError, IndexError):
                 self.reply(400, b'{}')
+                return
+            except sqlite3.Error:
+                self.reply(503, b'{"error":"database_unavailable"}')
                 return
             if not hmac.compare_digest(supplied.encode(), password.encode()):
                 self.reply(401, b'{"error":"invalid_password"}')
@@ -193,10 +231,12 @@ def main() -> None:
     database = args.database or settings.database_path
     if not database.is_file():
         parser.error("База не найдена. Укажите существующую базу бота через --database.")
+    pipeline = AdminPipeline(database, settings)
     try:
         server = make_server(AdminData(database, settings.profile_cards_enabled),
-                             password, port=args.port)
+                             password, port=args.port, pipeline=pipeline)
     except ValueError as exc:
+        pipeline.close()
         parser.error(str(exc))
     print(f"Админка: http://127.0.0.1:{server.server_port} (Ctrl+C — остановить)", flush=True)
     try:
@@ -205,6 +245,7 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        pipeline.close()
 
 
 if __name__ == "__main__":
