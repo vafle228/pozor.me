@@ -49,9 +49,15 @@ uv run pozor import preview --file .\imports\result.json --format telegram-deskt
 
 4. Preview ничего не добавляет в рабочую память: создаёт staging manifest с SHA256 файла, ID источника/target/destination, диапазоном, версиями parser/policy, ID выбранных сообщений, причинами включения и hash итогового нормализованного payload. Показывает счётчики self/mention/reply/context/unknown, пропущенные медиа/ошибки, несколько примеров и предупреждение о ручной привязке.
 5. Можно добавить `--message-ids 51,52,60` для пересечения с выбранным диапазоном или подготовить ручное досье. Упоминания устаревших usernames включать только через явно утверждённые aliases с диапазоном дат; совпадение «Макс» не считать связью. Не включать чужие приватные чаты в групповую память: назначение источника подтверждает оператор, для V1 разрешены только экспорты этой группы и ручные заметки.
+Неизвестный target допускается только в staging: `identity_confirmed` отражает состояние на момент preview. Apply проверяет наличие live-наблюдения участника именно в группе назначения заново, внутри транзакции; после такого наблюдения можно применить ещё не истёкший preview. Поле manifest само по себе не даёт подтверждения личности.
+
 6. `uv run pozor import apply --manifest .\data\staging\<batch>.json` проверяет hash, ID, allowlist, identity и policy заново, затем транзакционно применяет. При изменении файла нужен новый preview. Apply реализует идемпотентность; повторный запуск не удваивает строки. Большой import — staging chunks, атомарная активация batch только после полной загрузки.
 7. `uv run pozor profile show --chat ... --target ...` показывает доступные темы с происхождением. Профиль не обязан ждать LLM: импортированные цитаты доступны retrieval сразу. До первого вызова желательно закончить фоновую индексацию.
 8. `uv run pozor import rollback --batch <id>` удаляет привязки batch и производные карточки; общие сообщения из других batch/live не уничтожает.
+
+При миграции группы в supergroup активные импорты, досье, source mapping и экспортные namespaces сохраняются. Неактивированные preview помечаются expired: нужен новый preview с новым chat ID. Preview старой policy version также требуется пересоздать.
+
+Адаптер принимает только `private_group`, `private_supergroup` и `public_supergroup`, включая `chats.list` и большие файлы. Личные чаты, saved messages и каналы отклоняются. Соответствие исходной группы группе назначения по-прежнему подтверждает оператор.
 
 Для файлов больше 8 MiB установите optional extra `imports` (`uv sync --extra imports`); предел остаётся 100 MiB. В Windows для IANA timezone вроде `Asia/Yekaterinburg` также нужен пакет `tzdata`; без него preview завершится понятной ошибкой. UTC работает без timezone database.
 
@@ -68,7 +74,7 @@ uv run pozor import preview --file .\imports\result.json --format telegram-deskt
 - Forward — это слова пересланного автора, не автоматически автора-сендера. В V1 исключить forwarded content из self evidence; можно хранить как context. Service/media-only исключить.
 - Использовать `date_unixtime`; если нет — timezone-aware ISO, а naive ISO требует явную timezone. Ошибка даты/ID у выбранного сообщения — ошибка preview, а не тихая утрата.
 - Команды, prompt injections и прошлые панчи бота из импорта не выполняются. Импорт никогда не проходит через live router.
-- Точный дубль: namespace + source_message_id + content_hash. Тот же source key с другим текстом → conflict в preview. Live edit авторитетнее старого экспорта только при подтверждённом source mapping. Не перезаписывать автоматически.
+- Точный дубль: namespace + source_message_id + content_hash. Тот же source key с другим текстом, автором или датой → conflict при apply с откатом всей транзакции. Live edit авторитетнее старого экспорта только при подтверждённом source mapping. Не перезаписывать автоматически.
 
 Эталонная функция отбора находится в `reference/core.py`. Это чистое ядро для уже выбранного одного чата, не готовый безопасный загрузчик файлов. Полный adapter/validation/staging нужны в задаче T3.
 

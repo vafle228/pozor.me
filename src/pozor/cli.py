@@ -8,9 +8,11 @@ import typer
 from pydantic import ValidationError
 
 from pozor.config import Settings
+from pozor.context import ContextPack, Evidence
 from pozor.doctor import run_checks
 from pozor.importing import ImportErrorSafe, apply_import, preview_import, rollback_import
 from pozor.ingestion import ChatMigrationConflict, PollingConflictError
+from pozor.llm import Generator, InferenceError, LlamaClient
 from pozor.logging import configure_logging
 from pozor.runtime import run_telegram
 from pozor.storage import MigrationError, migrate
@@ -20,6 +22,39 @@ db_app = typer.Typer(help="Локальная база данных")
 app.add_typer(db_app, name="db")
 import_app = typer.Typer(help="Локальный preview и применение импорта")
 app.add_typer(import_app, name="import")
+llm_app = typer.Typer(help="Opt-in диагностика локального llama.cpp")
+app.add_typer(llm_app, name="llm")
+
+
+@llm_app.command("smoke")
+def llm_smoke() -> None:
+    """Check local server/model, tokenizer and non-thinking structured completion.
+
+    Uses synthetic input only. Does not download weights or contact Telegram.
+    """
+    async def smoke(settings: Settings) -> None:
+        deadline = asyncio.get_running_loop().time() + settings.generation_deadline_seconds
+        async with LlamaClient(settings) as client:
+            await client.check(deadline)
+            await client.wait_idle(deadline)
+            pack = ContextPack(
+                chat_id=-1, thread_id=0, target_id=1, target_label="Synthetic",
+                trigger=Evidence(evidence_id="trigger:1", chat_id=-1, allowed_target_id=1,
+                                 source_namespace="request", relation="trigger",
+                                 attribution="caller_hint", text="Обещаю выиграть в игре"),
+            )
+            result = await Generator(client).generate(pack, deadline)
+            if result.fallback:
+                raise InferenceError(result.reason)
+            typer.echo(f"OK structured non-thinking smoke; prompt tokens={result.token_count}")
+            typer.echo("GPU offload, hidden thinking and latency still require operator verification.")
+    try:
+        settings = Settings()
+        configure_logging(settings)
+        asyncio.run(smoke(settings))
+    except (ValidationError, InferenceError, TimeoutError):
+        typer.echo("FAIL llm smoke: check local server, model alias, template and deadline", err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.callback()

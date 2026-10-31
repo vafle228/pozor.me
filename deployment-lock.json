@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "status": "unverified_baseline",
+  "llama_cpp_build": null,
+  "model": {
+    "repo": "Qwen/Qwen3-8B-GGUF",
+    "revision": null,
+    "filename": null,
+    "sha256": null,
+    "quantization": "Q4_K_M",
+    "alias": "pozor-local"
+  },
+  "runtime": {
+    "context_size": 8192,
+    "slots": 1,
+    "enable_thinking": false,
+    "max_output_tokens": 180
+  },
+  "verification": {
+    "real_smoke": false,
+    "gpu": null,
+    "backend": null,
+    "latency": null
+  }
+}

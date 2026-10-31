@@ -11,14 +11,17 @@ from typing import Any
 from aiogram import Bot
 from aiogram.exceptions import TelegramConflictError
 
-from pozor.commands import close_sessions_on_startup, expire_sessions, handle_telegram_update
+from pozor.commands import expire_sessions
 from pozor.config import Settings
+from pozor.delivery import DeliveryPipeline, health_loop, recover_delivery
+from pozor.inference_queue import InferenceQueue
 from pozor.ingestion import (
     PollingConflictError,
     cleanup_expired_live_data,
     run_poller,
     sync_chat_allowlist,
 )
+from pozor.llm import Generator, LlamaClient
 from pozor.storage import migrate
 
 
@@ -52,10 +55,12 @@ async def run_telegram(settings: Settings) -> None:
     sync_chat_allowlist(
         database_path, settings.chat_allowlist, retention_days=settings.live_retention_days
     )
-    close_sessions_on_startup(database_path)
-    async with Bot(token=bot_token.get_secret_value()) as bot:
+    recover_delivery(database_path)
+    async with Bot(token=bot_token.get_secret_value()) as bot, LlamaClient(settings) as client:
         identity = await bot.get_me()
         source = AiogramUpdateSource(bot)
+        pipeline = DeliveryPipeline(database_path, settings, bot, Generator(client),
+                                    InferenceQueue(client.wait_idle))
 
         async def cleanup_loop() -> None:
             while True:
@@ -68,9 +73,7 @@ async def run_telegram(settings: Settings) -> None:
                 await asyncio.sleep(5)
 
         async def command_handler(payload: dict[str, object]) -> None:
-            await handle_telegram_update(
-                database_path,
-                bot,
+            await pipeline.handle_update(
                 payload,
                 owner_ids=frozenset(settings.owner_ids),
                 bot_id=identity.id,
@@ -79,12 +82,20 @@ async def run_telegram(settings: Settings) -> None:
 
         cleanup_task = asyncio.create_task(cleanup_loop())
         session_clock_task = asyncio.create_task(session_clock_loop())
+        sender_task = asyncio.create_task(pipeline.run_sender())
+        health_task = asyncio.create_task(health_loop(pipeline, client.check))
+        poller_task = asyncio.create_task(
+            run_poller(source, database_path, identity.id, control_handler=command_handler)
+        )
+        tasks = (cleanup_task, session_clock_task, sender_task, health_task, poller_task)
         try:
-            await run_poller(source, database_path, identity.id, control_handler=command_handler)
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
         finally:
-            cleanup_task.cancel()
-            session_clock_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await cleanup_task
-            with suppress(asyncio.CancelledError):
-                await session_clock_task
+            for task in tasks:
+                task.cancel()
+            await pipeline.aclose()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task

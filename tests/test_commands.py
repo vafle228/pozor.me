@@ -238,7 +238,7 @@ def test_admin_commands_use_real_member_lookup_and_control_inbox(db_path: Path) 
                     self.status = status
             return Member("administrator" if self.is_admin else "member")
 
-        async def send_message(self, *, chat_id: int, text: str, message_thread_id=None, reply_markup=None):
+        async def send_message(self, *, chat_id: int, text: str, message_thread_id=None, reply_markup=None, parse_mode=None):
             self.sent.append(text)
 
     update = {"message": {"message_id": 40, "chat": {"id": -1001, "type": "supergroup"},
@@ -266,7 +266,7 @@ def test_anonymous_admin_cannot_enable_and_other_actor_cannot_press_stop(db_path
             self.calls += 1
             return type("Member", (), {"status": "administrator"})()
 
-        async def send_message(self, *, chat_id: int, text: str, message_thread_id=None, reply_markup=None):
+        async def send_message(self, *, chat_id: int, text: str, message_thread_id=None, reply_markup=None, parse_mode=None):
             pass
 
         async def answer_callback_query(self, *, callback_query_id: str, text: str):
@@ -307,7 +307,7 @@ def test_roast_command_returns_session_bound_stop_buttons(db_path: Path) -> None
         async def get_chat_member(self, *, chat_id: int, user_id: int):
             raise AssertionError("roast start must not make an admin lookup")
 
-        async def send_message(self, *, chat_id: int, text: str, message_thread_id=None, reply_markup=None):
+        async def send_message(self, *, chat_id: int, text: str, message_thread_id=None, reply_markup=None, parse_mode=None):
             self.sent.append({"text": text, "reply_markup": reply_markup})
 
     bot = FakeBot()
