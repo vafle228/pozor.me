@@ -206,8 +206,9 @@ def retrieve(
             )
         card_ids = collect(columns + scope + " AND m.id IN (SELECT ce.message_id FROM card_evidence ce "
                            "JOIN profile_cards c ON c.id=ce.card_id WHERE c.chat_id=? "
-                           "AND c.target_id=? AND c.excluded=0 AND ce.source_text_hash=m.text_hash) "
-                           "ORDER BY m.id DESC LIMIT 40", (*params, *params)) if cards_enabled else []
+                           "AND c.target_id=? AND (c.profile_version=2 OR ?=1) "
+                           "AND c.excluded=0 AND ce.source_text_hash=m.text_hash) "
+                           "ORDER BY m.id DESC LIMIT 40", (*params, *params, int(cards_enabled)))
         ranked = fuse(list(zip(weights, [lexical, recent_self, mentions, [*manual_ids, *card_ids]], strict=True)))
         current = collect(columns + scope + """ AND m.origin='live' AND coalesce(m.thread_id,0)=?
             AND m.source_message_id!=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 20""",
