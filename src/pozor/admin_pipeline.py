@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import logging
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,10 +16,11 @@ from telethon import errors
 from pozor import semantic_profiles
 from pozor.config import Settings
 from pozor.importing import apply_import, preview_import
-from pozor.llm import InferenceError
 from pozor.semantic_profiles import require_scope
 from pozor.storage import connect
 from pozor.telegram_account import AccountError, TelegramAccount, private_write
+
+logger = logging.getLogger(__name__)
 
 
 class AdminPipeline:
@@ -181,7 +183,12 @@ class AdminPipeline:
             raise
         except errors.FloodWaitError as exc:
             self.job.update(state="failed", message=f"Telegram просит подождать {exc.seconds} секунд.")
-        except (ValueError, InferenceError, errors.RPCError, OSError):
+        except AccountError as exc:
+            self.drafts.clear()
+            self.job.update(state="failed", message=str(exc) + " Уже импортированные цитаты сохранены.")
+        except Exception as exc:  # noqa: BLE001 - terminal job boundary; never expose exception text
+            # Never strand a completed task in 'running', or log RPC/model payloads.
+            logger.warning("Profile job failed (%s)", type(exc).__name__)
             self.drafts.clear()
             self.job.update(state="failed", message="Задача не завершена. Проверьте доступ к группе, "
                             "согласие и работу модели. Уже импортированные цитаты сохранены.")

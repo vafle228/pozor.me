@@ -16,6 +16,7 @@ dependencies = [
     "typer>=0.16,<1",
     "telethon>=1.42,<2",
     "qrcode>=8.2,<9",
+    "ijson>=3.4,<4",
 ]
 
 [project.optional-dependencies]

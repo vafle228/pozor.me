@@ -148,6 +148,14 @@ def test_scope_bad_input_and_duplicate_jobs(pipeline):
     assert pipeline.call("job")["drafts"] == []
 
 
+def test_unexpected_worker_error_finishes_without_leaking_payload(pipeline, caplog):
+    pipeline.account.history = AsyncMock(side_effect=RuntimeError("private source text"))
+    start_job(pipeline)
+    job = wait_job(pipeline)
+    assert job["state"] == "failed"
+    assert "private source text" not in str(job) + caplog.text
+
+
 def test_forget_while_downloading_prevents_import(database, pipeline):
     async def history(*args):
         forget(database, -1, 42)
