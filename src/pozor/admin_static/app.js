@@ -24,7 +24,7 @@ async function boot() {
   const selected = $("chat").value;
   $("chat").replaceChildren(...state.chats.map(chat => { const option = node("option", `Чат ${chat.chat_id}${chat.allowed && chat.enabled ? " · сбор включён" : " · сбор выключен"}`); option.value = String(chat.chat_id); return option; }));
   if (state.chats.some(c => String(c.chat_id) === selected)) $("chat").value = selected;
-  $("profile-note").textContent = result.profiles_enabled ? "Сбор карточек включён в конфигурации. Видны участники с согласием; цитаты проверяются по сроку хранения и исходным сообщениям." : "Сбор карточек выключен в конфигурации (PROFILE_CARDS_ENABLED=false). Уже собранные актуальные карточки доступны ниже. Для новых включите сбор и перезапустите бот.";
+  $("profile-note").textContent = result.profiles_enabled ? "Автоматическая сборка цитат включена. Смысловой профиль можно составить в разделе «История Telegram». Показаны участники с согласием и актуальные источники." : "Автоматическая сборка цитат выключена. Смысловые профили можно составить в разделе «История Telegram» — включать фоновый сбор для этого не нужно.";
   renderChats(); await page(state.page);
 }
 function renderChats() {
@@ -50,7 +50,7 @@ async function profiles() {
     const info = node("div"); info.append(node("h3", name), node("div", `${member.current_username ? "@" + member.current_username + " · " : ""}ID ${member.user_id}`, "meta"));
     head.append(node("div", name.slice(0, 2).toUpperCase(), "avatar"), info); el.append(head);
     el.append(node("p", `Чат ${member.chat_id} · ${member.cards.length} карточек · был(а) ${dates(member.last_seen)}`));
-    if (!member.cards.length) el.append(node("p", "Портрет ещё не собран или источники уже недоступны. Нужны согласие, сообщения и включённый сбор карточек.", "note"));
+    if (!member.cards.length) el.append(node("p", "Портрет ещё не собран или источники уже недоступны. Составьте профиль в разделе «История Telegram».", "note"));
     for (const card of member.cards) {
       const item = node("div", undefined, "card");
       item.append(node("span", card.profile_version === 2 ? "Наблюдение · проверено оператором" : names[card.kind] || card.kind, "tag"));
