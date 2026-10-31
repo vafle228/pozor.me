@@ -302,6 +302,15 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
                     (chat_id, target_id),
                 )
 
+    from pozor.privacy import blocked
+
+    if ((author_id is not None and blocked(connection, chat_id, author_id)) or any(
+        blocked(connection, chat_id, row[0]) for row in connection.execute(
+            "SELECT target_id FROM message_subjects WHERE message_id=?", (message_row_id,)
+        ).fetchall()
+    )):
+        connection.execute("DELETE FROM messages WHERE id=?", (message_row_id,))
+        return
     connection.execute(
         """INSERT INTO members(chat_id, user_id, display_name, current_username, last_seen)
            SELECT ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -470,9 +479,18 @@ async def poll_once(
     if control_handler is not None:
         with connect(database_path) as connection:
             pending = connection.execute(
-                "SELECT normalized_payload FROM inbox WHERE processed_at IS NULL ORDER BY update_id"
+                "SELECT update_id,normalized_payload FROM inbox WHERE processed_at IS NULL ORDER BY update_id"
             ).fetchall()
         for row in pending:
+            # A preceding /forget_me may have purged later payloads from this batch.
+            # Do not route the stale in-memory copy after its durable row was removed.
+            with connect(database_path) as connection:
+                retained = connection.execute(
+                    "SELECT 1 FROM inbox WHERE update_id=? AND processed_at IS NULL",
+                    (row['update_id'],),
+                ).fetchone()
+            if retained is None:
+                continue
             try:
                 payload = json.loads(row["normalized_payload"])
             except json.JSONDecodeError:
@@ -628,6 +646,7 @@ def _migrate_chat_scope(connection: sqlite3.Connection, old_chat_id: int, new_ch
         "UPDATE imports SET chat_id=?, status=CASE WHEN status='staged' THEN 'expired' ELSE status END "
         "WHERE chat_id=?", (new_chat_id, old_chat_id),
     )
+    connection.execute("UPDATE forgotten_members SET chat_id=? WHERE chat_id=?", (new_chat_id, old_chat_id))
     connection.execute("DELETE FROM members WHERE chat_id = ?", (old_chat_id,))
     connection.execute("DELETE FROM chats WHERE chat_id = ?", (old_chat_id,))
 

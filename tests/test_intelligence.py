@@ -278,7 +278,7 @@ def test_retrieval_snapshot_scope_fts_provenance_reply_parent_and_empty(tmp_path
             ns = f"live:{chat}"
             db.execute("""INSERT INTO messages(id,scope_chat_id,source_namespace,source_message_id,
                 author_id,text,text_hash,occurred_at,origin,thread_id,reply_source_id)
-                VALUES (?,?,?,?,?,?,?,'2026-01-01T00:00:00+00:00','live',?,?)""",
+                VALUES (?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'live',?,?)""",
                 (mid, chat, ns, mid, author, text, hashlib.sha256(text.encode()).hexdigest(),
                  thread, parent))
             db.execute("INSERT INTO message_subjects VALUES (?,?,?,?)",

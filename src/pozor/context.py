@@ -4,13 +4,44 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pozor.storage import connect
+
+
+def sources_current(db: sqlite3.Connection, chat: int, target: int,
+                    ids: list[str], now: float) -> bool:
+    """Check source existence, entitlement and TTL without relying on cleanup timing."""
+    stamp = datetime.fromtimestamp(now, UTC).isoformat()
+    for eid in ids:
+        if eid.startswith('trigger:'):
+            continue
+        if eid.startswith('message:'):
+            row = db.execute("SELECT 1 FROM messages m JOIN message_subjects s ON s.message_id=m.id "
+                             "JOIN chats c ON c.chat_id=m.scope_chat_id WHERE m.id=? "
+                             "AND m.scope_chat_id=? AND s.target_id=? AND "
+                             "((m.origin='live' AND julianday(m.occurred_at,'+' || c.retention_days || ' days')"
+                             ">julianday(?)) OR EXISTS (SELECT 1 FROM import_items ii JOIN imports i "
+                             "USING(batch_id) WHERE ii.message_id=m.id AND i.target_id=s.target_id "
+                             "AND i.chat_id=m.scope_chat_id AND ii.relation=s.relation AND i.status='active' "
+                             "AND julianday(i.retained_until)>julianday(?)))",
+                             (eid[8:], chat, target, stamp, stamp)).fetchone()
+        elif eid.startswith('manual:'):
+            row = db.execute("SELECT 1 FROM manual_items mi JOIN imports i USING(batch_id) "
+                             "WHERE mi.item_id=? AND mi.target_id=? AND i.chat_id=? AND i.target_id=? "
+                             "AND i.status='active' AND julianday(i.retained_until)>julianday(?)",
+                             (eid[7:], target, chat, target, stamp)).fetchone()
+        else:
+            return False
+        if row is None:
+            return False
+    return True
 
 
 class Contract(BaseModel):
@@ -101,8 +132,9 @@ def fuse(rankings: Sequence[tuple[float, Sequence[str]]], k: int = 60) -> list[s
 def retrieve(
     database: Path, *, chat_id: int, thread_id: int, target_id: int,
     trigger_id: int, hint: str, target_label: str, weights: tuple[float, ...] = (1, .8, .5, .6),
+    cards_enabled: bool = False,
 ) -> ContextPack:
-    """Read one SQLite snapshot; no network or profile extraction (T6)."""
+    """Read one SQLite snapshot; cards only rank their original source quotes."""
     if len(weights) != 4:
         raise ValueError("four retrieval weights required")
     with connect(database) as db:
@@ -112,10 +144,13 @@ def retrieve(
             raise ValueError("chat outside allowlist")
         scope = """ FROM messages m JOIN message_subjects s ON s.message_id=m.id
             WHERE m.scope_chat_id=? AND s.target_id=? AND
-            (m.origin='live' OR EXISTS (
+            ((m.origin='live' AND julianday(m.occurred_at,
+                '+' || (SELECT retention_days FROM chats WHERE chat_id=m.scope_chat_id) || ' days')
+                >julianday('now')) OR EXISTS (
                 SELECT 1 FROM import_items ii JOIN imports i ON i.batch_id=ii.batch_id
                 WHERE ii.message_id=m.id AND i.chat_id=m.scope_chat_id
-                AND i.target_id=s.target_id AND ii.relation=s.relation AND i.status='active'))
+                AND i.target_id=s.target_id AND ii.relation=s.relation AND i.status='active'
+                AND julianday(i.retained_until)>julianday('now')))
             AND s.relation=(SELECT ss.relation FROM message_subjects ss
                 WHERE ss.message_id=m.id AND ss.target_id=s.target_id
                 ORDER BY CASE ss.relation WHEN 'self' THEN 0 WHEN 'reply' THEN 1
@@ -158,7 +193,8 @@ def retrieve(
         manual_ids = []
         for row in db.execute("""SELECT mi.* FROM manual_items mi JOIN imports i
             ON i.batch_id=mi.batch_id WHERE i.chat_id=? AND mi.target_id=?
-            AND i.target_id=? AND i.status='active' ORDER BY i.created_at DESC,mi.item_id LIMIT 40""",
+            AND i.target_id=? AND i.status='active' AND julianday(i.retained_until)>julianday('now')
+            ORDER BY i.created_at DESC,mi.item_id LIMIT 40""",
             (chat_id, target_id, target_id)):
             eid = f"manual:{row['item_id']}"
             manual_ids.append(eid)
@@ -168,7 +204,11 @@ def retrieve(
                 attribution="manual_claim", text=row["text"], timestamp=row["occurred_at"],
                 text_hash=row["text_hash"], topic="dossier", policy_version=chat["policy_version"],
             )
-        ranked = fuse(list(zip(weights, [lexical, recent_self, mentions, manual_ids], strict=True)))
+        card_ids = collect(columns + scope + " AND m.id IN (SELECT ce.message_id FROM card_evidence ce "
+                           "JOIN profile_cards c ON c.id=ce.card_id WHERE c.chat_id=? "
+                           "AND c.target_id=? AND c.excluded=0 AND ce.source_text_hash=m.text_hash) "
+                           "ORDER BY m.id DESC LIMIT 40", (*params, *params)) if cards_enabled else []
+        ranked = fuse(list(zip(weights, [lexical, recent_self, mentions, [*manual_ids, *card_ids]], strict=True)))
         current = collect(columns + scope + """ AND m.origin='live' AND coalesce(m.thread_id,0)=?
             AND m.source_message_id!=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 20""",
             (*params, thread_id, trigger_id))

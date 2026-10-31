@@ -17,11 +17,12 @@ from pozor.delivery import DeliveryPipeline, health_loop, recover_delivery
 from pozor.inference_queue import InferenceQueue
 from pozor.ingestion import (
     PollingConflictError,
-    cleanup_expired_live_data,
     run_poller,
     sync_chat_allowlist,
 )
 from pozor.llm import Generator, LlamaClient
+from pozor.privacy import cleanup
+from pozor.profiles import profile_loop
 from pozor.storage import migrate
 
 
@@ -64,7 +65,8 @@ async def run_telegram(settings: Settings) -> None:
 
         async def cleanup_loop() -> None:
             while True:
-                await asyncio.to_thread(cleanup_expired_live_data, database_path)
+                await asyncio.to_thread(cleanup, database_path,
+                                        import_days=settings.import_retention_days)
                 await asyncio.sleep(3600)
 
         async def session_clock_loop() -> None:
@@ -87,7 +89,9 @@ async def run_telegram(settings: Settings) -> None:
         poller_task = asyncio.create_task(
             run_poller(source, database_path, identity.id, control_handler=command_handler)
         )
-        tasks = (cleanup_task, session_clock_task, sender_task, health_task, poller_task)
+        tasks: tuple[asyncio.Task[None], ...] = (cleanup_task, session_clock_task, sender_task, health_task, poller_task)
+        if settings.profile_cards_enabled:
+            tasks += (asyncio.create_task(profile_loop(database_path, client, pipeline.queue)),)
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:

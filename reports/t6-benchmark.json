@@ -1,0 +1,591 @@
+{
+  "suite_sha256": "cc36cf1a41db63b41b792328d6b84e35c031980d12176db1e1394b73b55d2f07",
+  "mode": "offline_retrieval",
+  "human_review": "pending",
+  "humor_gate": "not_evaluated",
+  "gpu_backend_model_build": "operator must record deployment-lock and hardware",
+  "queue_wait_ms": null,
+  "concurrency": "not_measured",
+  "repeat": 1,
+  "coverage_scope": "retrieval candidates before model token packing",
+  "results": [
+    {
+      "id": "callback-game",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 134.36010000032184,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-reddit",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 110.14819999991232,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-coffee",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 123.94270000004326,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-running",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 142.36129999972036,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-cooking",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 133.3556999998109,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-chess",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 122.35950000012963,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-books",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 116.89359999991211,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-plants",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 130.85350000028484,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-guitar",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 118.06249999972351,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "callback-coding",
+      "category": "callback",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 396.64059999995516,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "empty-0",
+      "category": "empty",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 114.30920000020706,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "empty-1",
+      "category": "empty",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 118.53969999992842,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "empty-2",
+      "category": "empty",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 133.16420000001017,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "empty-3",
+      "category": "empty",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 124.84719999974914,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "empty-4",
+      "category": "empty",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 129.46560000000318,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "identity-0",
+      "category": "identity",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 171.55249999996158,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "identity-1",
+      "category": "identity",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 135.31360000024506,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "identity-2",
+      "category": "identity",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 129.60490000023128,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "identity-3",
+      "category": "identity",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 138.64109999985885,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "identity-4",
+      "category": "identity",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 136.25469999988127,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "adversarial-0",
+      "category": "adversarial",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 136.44109999995635,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "adversarial-1",
+      "category": "adversarial",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 104.92410000006203,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "adversarial-2",
+      "category": "adversarial",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 137.61040000008506,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "adversarial-3",
+      "category": "adversarial",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 129.75260000030175,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "adversarial-4",
+      "category": "adversarial",
+      "retrieval_pass": true,
+      "control_pass": null,
+      "expected_ids": [
+        "message:1"
+      ],
+      "retrieved_ids": [
+        "message:1"
+      ],
+      "setup_and_retrieval_ms": 142.19180000009146,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "control-stop",
+      "category": "control",
+      "retrieval_pass": true,
+      "control_pass": true,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 120.3205000001617,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "control-edit",
+      "category": "control",
+      "retrieval_pass": true,
+      "control_pass": true,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 132.69590000027165,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "control-forget",
+      "category": "control",
+      "retrieval_pass": true,
+      "control_pass": true,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 125.72700000009718,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "control-deadline",
+      "category": "control",
+      "retrieval_pass": true,
+      "control_pass": true,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 124.24779999992097,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    },
+    {
+      "id": "control-optout",
+      "category": "control",
+      "retrieval_pass": true,
+      "control_pass": true,
+      "expected_ids": [],
+      "retrieved_ids": [],
+      "setup_and_retrieval_ms": 129.59119999959512,
+      "generations": [],
+      "human_scores_0_to_2": {
+        "relevance": null,
+        "callback": null,
+        "brevity": null,
+        "humor": null
+      },
+      "human_safety_pass": null
+    }
+  ],
+  "evidence_coverage": 1.0,
+  "generated_evidence_coverage": null,
+  "retrieval_pass": true,
+  "model_latency_ms": null
+}
