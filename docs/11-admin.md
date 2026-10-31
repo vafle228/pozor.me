@@ -9,13 +9,13 @@
 Из корня репозитория, Python 3.12 или 3.13:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+uv sync --frozen
 $env:ADMIN_PASSWORD = Read-Host "Придумайте пароль админки (минимум 16 символов)"
-.\.venv\Scripts\python.exe -m pozor.admin
+uv run --frozen python -m pozor.admin
 ```
 
-Если `.venv` уже установлено для бота, первые две команды не нужны.
+`uv` создаёт и обслуживает `.venv` автоматически по `uv.lock`.
+Если окружение бота уже синхронизировано, первую команду можно пропустить.
 Открыть <http://127.0.0.1:8090> и ввести этот пароль. Для остановки — Ctrl+C.
 Пароль можно вместо переменной окружения записать в локальный `.env`:
 
@@ -31,7 +31,7 @@ DATABASE_PATH=./data/pozor.sqlite3
 Другой файл базы и порт:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pozor.admin --database "C:\path\to\pozor.sqlite3" --port 8095
+uv run --frozen python -m pozor.admin --database "C:\path\to\pozor.sqlite3" --port 8095
 ```
 
 Нужно указать **существующую базу бота с применёнными миграциями**.
@@ -45,14 +45,13 @@ DATABASE_PATH=./data/pozor.sqlite3
 ## Linux / macOS
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+uv sync --frozen
 read -r -s -p 'Пароль админки: ' ADMIN_PASSWORD; echo
 export ADMIN_PASSWORD
-.venv/bin/python -m pozor.admin --database ./data/pozor.sqlite3
+uv run --frozen python -m pozor.admin --database ./data/pozor.sqlite3
 ```
 
-Для обычной работы достаточно `pip install -e .`; extra `dev` нужен для тестов.
+Для обычной работы достаточно `uv sync --frozen`; extra `dev` нужен для тестов.
 Сервер слушает только `127.0.0.1`. Для базы на другом сервере запускайте
 админку рядом с ботом и подключайтесь через SSH-туннель:
 
@@ -110,7 +109,7 @@ PROFILE_CARDS_ENABLED=true
 Это локальный HTTP-сервер: для удалённого доступа используйте SSH-туннель.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_admin.py -q --basetemp=.test-tmp/admin
+uv run --frozen --extra dev pytest tests/test_admin.py -q --basetemp=.test-tmp/admin
 node --check src/pozor/admin_static/app.js
 ```
 
