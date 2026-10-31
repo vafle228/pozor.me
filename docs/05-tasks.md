@@ -117,6 +117,13 @@ Human humor/safety gate, model latency, concurrency и VRAM остаются н�
 
 ## T7 — эксплуатация и финальный smoke
 
+**Статус 2026-10-31: offline-часть реализована, пакет не закрыт.** Добавлены
+SQLite backup/restore с WAL/FTS/integrity/checksum проверками и recovery delivery,
+`status`, offline проверка deployment artifacts, Windows/systemd supervisor
+samples и [подробная передача T7](09-t7-operations.md). Новая миграция не нужна:
+эксплуатационные операции используют существующую схему без изменения контрактов.
+T6 human/model gate, реальные Telegram/GPU и supervisor smoke остаются открытыми.
+
 Результат: проверенный runbook Windows, варианты GPU backend, deployment-lock, backup/restore, supervisor samples, final status. Тестовая группа и локальная GPU используются только при наличии токена/весов; скачивание крупной модели не скрывать как часть unit test.
 
 Приёмка: установка с нуля по README, импорт выбранной истории, контекстный ответ, продолжение/stop, restart без повторного панча, backup restore; итог содержит реально проверенное и непроверенное. Не требуются deploy в облако, commit или PR без указания владельца.

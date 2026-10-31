@@ -1,0 +1,21 @@
+# SAMPLE: install only after creating dedicated user, private paths and local .venv.
+[Unit]
+Description=pozor.me Telegram poller
+After=network-online.target pozor-llm.service
+Wants=network-online.target pozor-llm.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=pozor
+WorkingDirectory=/opt/pozor.me
+ExecStart=/opt/pozor.me/.venv/bin/pozor run
+Restart=on-failure
+RestartSec=60
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

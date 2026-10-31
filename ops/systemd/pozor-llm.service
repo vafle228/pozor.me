@@ -1,0 +1,21 @@
+# SAMPLE: artifact paths and flags must match the operator-verified build/lock.
+[Unit]
+Description=pozor.me local llama.cpp
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=pozor
+WorkingDirectory=/opt/pozor.me
+Environment='LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}'
+ExecStartPre=/opt/pozor.me/.venv/bin/pozor deployment check --model /opt/pozor.me/models/Qwen3-8B-Q4_K_M.gguf --server /opt/pozor.me/vendor/llama-server
+ExecStart=/opt/pozor.me/vendor/llama-server -m /opt/pozor.me/models/Qwen3-8B-Q4_K_M.gguf -ngl 99 -c 8192 -np 1 --jinja --host 127.0.0.1 --port 8080 --alias pozor-local
+Restart=on-failure
+RestartSec=60
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

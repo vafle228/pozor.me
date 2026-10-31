@@ -10,6 +10,11 @@
 
 > **Статус:** T0–T5 реализованы с offline acceptance. T6 добавляет цитатные карточки, удаление и offline eval; пакет **не закрыт** до ручной оценки качества и замеров локальной модели. `pozor run` подключает реальные Telegram Bot API и локальный llama.cpp. Реальные Telegram/GPU smoke не проводились. [Статус и передача T6](docs/08-t6-profiles-privacy-eval.md).
 
+T7 добавляет проверенные offline backup/restore, `status`, проверку локальных
+deployment artifacts и supervisor samples. **T7 не закрыт:** final smoke в тестовой
+группе, GPU и запуск supervisor на целевой машине ещё не проверены.
+[Приёмка и передача T7](docs/09-t7-operations.md).
+
 ## Задача и границы
 
 Первая версия рассчитана на личный запуск в нескольких небольших группах. Она должна принимать новые сообщения только из разрешённых чатов, поддерживать добровольное участие, импорт выбранной истории и генерацию ответа локальной языковой моделью. Владелец выбирает импортируемые данные; само добавление истории не включает участие в прожарке.
@@ -63,6 +68,24 @@ python -m unittest discover -s tests -v
 uv sync --frozen
 uv run pozor --help
 ```
+
+Для новой Windows-установки: Python 3.12 и `uv` должны быть установлены заранее.
+Из корня checkout выполните `uv sync --frozen --extra imports --extra dev`, затем
+`Copy-Item .env.example .env` (если `.env` ещё нет), `uv run pozor doctor` и
+`uv run pozor db migrate`. Заполните `.env` только локально; до ввода токена doctor
+ожидаемо сообщает missing token. Для локальных DB-команд токен не нужен.
+Offline acceptance: `uv run --frozen --extra dev --extra imports pytest -q`.
+Порядок запуска GPU/бота и восстановления — в [runbook](docs/04-runbook.md).
+
+```powershell
+uv run pozor status
+uv run pozor db backup --directory data/backups
+uv run pozor db restore --source data/backups/<snapshot>.sqlite3 --destination data/recovery/pozor.sqlite3
+```
+
+Restore требует новый путь, отменяет сохранённые pending turns и закрывает сессии;
+сетевой запуск не выполняется. Backups содержат переписку: private ACL задаётся
+оператором. Ротация по умолчанию — 7 дней при каждом успешном backup.
 
 `uv run pozor doctor` проверяет конфигурацию, поддержку FTS5 в SQLite, доступность каталога базы данных и наличие `BOT_TOKEN`. Команда не обращается к сети и не выводит значение токена. `uv run pozor db migrate` применяет checksum-защищённые миграции. `uv run pozor run` запускает Telegram long polling и требует токен; для offline-проверок эта команда не нужна.
 
