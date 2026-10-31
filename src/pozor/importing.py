@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -17,12 +18,13 @@ from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pozor.import_rules import Alias, ImportRow, select_export
 from pozor.storage import connect
-from reference.core import Alias, ImportRow, select_export
 
 MAX_IMPORT_BYTES = 100 * 1024 * 1024
 PARSER_VERSION = "1"
-POLICY_VERSION = "1"
+POLICY_VERSION = "2"
+_GROUP_TYPES = {"private_group", "private_supergroup", "public_supergroup"}
 STAGING_TTL = timedelta(hours=24)
 _USER_ID = re.compile(r"user([1-9][0-9]*)\Z")
 
@@ -123,6 +125,11 @@ def _range_bounds(from_date: str, until_date: str, timezone: str) -> tuple[int, 
     return int(start_dt.timestamp()), int(end_dt.timestamp())
 
 
+def _validate_group_type(chat_type: object) -> None:
+    if not isinstance(chat_type, str) or chat_type not in _GROUP_TYPES:
+        raise ImportErrorSafe("only group exports are supported; private chats and saved messages are forbidden")
+
+
 def _desktop_chat(root: Mapping[str, Any], source_chat_id: int) -> tuple[Mapping[str, Any], Sequence[Any]]:
     if not isinstance(root, Mapping):
         raise ImportErrorSafe("unsupported Telegram Desktop export shape")
@@ -132,11 +139,13 @@ def _desktop_chat(root: Mapping[str, Any], source_chat_id: int) -> tuple[Mapping
         if len(candidates) != 1:
             raise ImportErrorSafe("source chat ID must match exactly one exported chat")
         chat = candidates[0]
+        _validate_group_type(chat.get("type"))
         messages = chat.get("messages")
         if not isinstance(messages, list):
             raise ImportErrorSafe("selected export chat has no messages list")
         return chat, messages
-    if root.get("type") in {"personal_chat", "private_group", "private_supergroup", "saved_messages"}:
+    _validate_group_type(root.get("type"))
+    if root.get("type") in _GROUP_TYPES:
         export_id = root.get("id")
         if export_id != source_chat_id:
             raise ImportErrorSafe("source chat ID does not match the single-chat export")
@@ -150,7 +159,7 @@ def _desktop_chat(root: Mapping[str, Any], source_chat_id: int) -> tuple[Mapping
 def _stream_desktop_messages(path: Path, source_chat_id: int) -> Iterable[Any]:
     """Yield single-chat messages incrementally; chats.list selects one chat first."""
     try:
-        import ijson  # type: ignore[import-not-found]
+        import ijson  # type: ignore[import-untyped]
     except ImportError:
         raise ImportErrorSafe("install the 'imports' extra for files larger than 8 MiB") from None
     try:
@@ -168,9 +177,8 @@ def _stream_desktop_messages(path: Path, source_chat_id: int) -> Iterable[Any]:
                 if prefix == "messages" and event == "start_array":
                     break
         if not has_chat_list:
-            if export_id != source_chat_id or export_type not in {
-                "personal_chat", "private_group", "private_supergroup", "saved_messages"
-            }:
+            _validate_group_type(export_type)
+            if export_id != source_chat_id:
                 raise ImportErrorSafe("source chat ID does not match the single-chat export")
 
             def single_messages() -> Iterable[Any]:
@@ -185,6 +193,7 @@ def _stream_desktop_messages(path: Path, source_chat_id: int) -> Iterable[Any]:
             ]
         if len(matches) != 1 or not isinstance(matches[0].get("messages"), list):
             raise ImportErrorSafe("source chat ID must match exactly one exported chat")
+        _validate_group_type(matches[0].get("type"))
         return cast(Iterable[Any], iter(matches[0]["messages"]))
     except ImportErrorSafe:
         raise
@@ -222,7 +231,7 @@ def _namespace(source_chat_id: int) -> str:
     return f"telegram-desktop:{source_chat_id}"
 
 
-def _validate_scope(database_path: Path, chat_id: int, target_id: int) -> None:
+def _validate_scope(database_path: Path, chat_id: int, target_id: int) -> bool:
     with connect(database_path) as connection:
         chat = connection.execute(
             "SELECT allowed FROM chats WHERE chat_id=?", (chat_id,)
@@ -232,9 +241,7 @@ def _validate_scope(database_path: Path, chat_id: int, target_id: int) -> None:
         member = connection.execute(
             "SELECT 1 FROM members WHERE chat_id=? AND user_id=?", (chat_id, target_id)
         ).fetchone()
-        # Unknown targets may be staged, but the manifest carries this fact and
-        # apply asks for the same explicit operator identity confirmation.
-        _ = member
+        return member is not None
 
 
 def _prepare_desktop_rows(
@@ -249,6 +256,7 @@ def _prepare_desktop_rows(
     timezone: str,
     selected_ids: set[int] | None,
     neighbors: int,
+    reply_ids: dict[int, int] | None = None,
 ) -> list[ImportRow]:
     raw_messages: Iterable[Any]
     if isinstance(root, Mapping):
@@ -258,12 +266,19 @@ def _prepare_desktop_rows(
             raise ImportErrorSafe("unsupported Telegram Desktop export shape")
         raw_messages = cast(Iterable[Any], root)
     aliases = _alias_snapshot(database_path, chat_id, target_id)
+    def capture(message: Any) -> Any:
+        if reply_ids is not None and isinstance(message, Mapping):
+            mid, parent = message.get("id"), message.get("reply_to_message_id")
+            if type(mid) is int and type(parent) is int and parent > 0:
+                reply_ids[mid] = parent
+        return message
+
     try:
         normalized_messages = (
             _normalize_desktop_date(message, timezone)
             if isinstance(message, Mapping) and message.get("type") == "message"
             else message
-            for message in raw_messages
+            for message in (capture(item) for item in raw_messages)
         )
         return select_export(
             normalized_messages, target_id=target_id, since=since, until=until,
@@ -340,7 +355,7 @@ def preview_import(
         raise ImportErrorSafe("chat and target IDs must be valid")
     source_file = file_path.expanduser().resolve()
     file_hash = _file_digest(source_file)
-    _validate_scope(database_path, chat_id, target_id)
+    identity_confirmed = _validate_scope(database_path, chat_id, target_id)
     root: Any = None
     normalized: list[dict[str, Any]] = []
     source_id = source_chat_id
@@ -356,12 +371,15 @@ def preview_import(
         else:
             root = _json_root(source_file)
             export_input = root
+        reply_ids: dict[int, int] = {}
         rows = _prepare_desktop_rows(
             database_path, export_input, source_chat_id=source_chat_id, chat_id=chat_id,
             target_id=target_id, since=since, until=until, timezone=timezone, selected_ids=selected_ids,
-            neighbors=neighbors,
+            neighbors=neighbors, reply_ids=reply_ids,
         )
         normalized = [_row_payload(row) for row in rows]
+        for item in normalized:
+            item["reply_source_id"] = reply_ids.get(item["message_id"])
         source_namespace = _namespace(source_chat_id)
     elif format == "dossier-v1":
         if source_chat_id is not None:
@@ -405,7 +423,7 @@ def preview_import(
         "expires_at": (created + STAGING_TTL).isoformat(timespec="seconds"),
         "messages": normalized if format == "telegram-desktop" else [],
         "manual_items": normalized if format == "dossier-v1" else [],
-        "identity_confirmed": True,
+        "identity_confirmed": identity_confirmed,
     }
     manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
@@ -502,8 +520,6 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
         raise ImportErrorSafe("staging preview expired; create a new preview")
     if _file_digest(source_file) != file_hash:
         raise ImportErrorSafe("source file changed after preview; create a new preview")
-    if not manifest.get("identity_confirmed"):
-        raise ImportErrorSafe("target identity must be explicitly confirmed")
 
     messages = manifest.get("messages")
     manual_items = manifest.get("manual_items")
@@ -529,6 +545,12 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
         scope = connection.execute("SELECT allowed FROM chats WHERE chat_id=?", (chat_id,)).fetchone()
         if scope is None or not scope["allowed"]:
             raise ImportErrorSafe("destination chat is not in CHAT_ALLOWLIST")
+        if connection.execute(
+            "SELECT 1 FROM members WHERE chat_id=? AND user_id=?", (chat_id, target_id)
+        ).fetchone() is None:
+            raise ImportErrorSafe("target identity must be confirmed by a live observation in this chat")
+        if staged["chat_id"] != chat_id:
+            raise ImportErrorSafe("chat migrated after preview; create a new preview")
         if manifest["format"] == "telegram-desktop":
             mapping = connection.execute(
                 "SELECT mapping_status,destination_chat_id FROM source_chats WHERE namespace=?", (namespace,)
@@ -552,11 +574,19 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
                 raise ImportErrorSafe("invalid imported relation")
             text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             source_message_id = mid
+            parent = item.get("reply_source_id")
+            if parent is not None and (type(parent) is not int or parent <= 0):
+                raise ImportErrorSafe("invalid reply source ID")
             existing = connection.execute(
-                "SELECT id,text_hash,scope_chat_id,origin FROM messages WHERE source_namespace=? AND source_message_id=?",
+                "SELECT id,text_hash,scope_chat_id,origin,author_id,occurred_at FROM messages "
+                "WHERE source_namespace=? AND source_message_id=?",
                 (namespace, source_message_id),
             ).fetchone()
-            if existing and existing["text_hash"] != text_hash:
+            occurred_at = datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
+            if existing and (
+                existing["text_hash"] != text_hash or existing["author_id"] != author_id
+                or existing["occurred_at"] != occurred_at
+            ):
                 raise ImportErrorSafe(f"source message {mid} conflicts with previously imported content")
             if existing and (existing["scope_chat_id"] != chat_id or existing["origin"] != "export"):
                 raise ImportErrorSafe(f"source message {mid} is mapped to another scope")
@@ -567,10 +597,12 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
                     """INSERT INTO messages(scope_chat_id,source_namespace,source_message_id,thread_id,
                        author_id,text,text_hash,occurred_at,origin) VALUES (?,?,?,NULL,?,?,?,?, 'export')""",
                     (chat_id, namespace, source_message_id, author_id, text, text_hash,
-                     datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")),
+                     occurred_at),
                 )
                 message_db_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-            attribution = "observed_self" if relation == "self" and author_id == target_id else "third_party"
+                connection.execute("UPDATE messages SET reply_source_id=? WHERE id=?",
+                                   (parent, message_db_id))
+            attribution = "imported_quote" if relation == "self" and author_id == target_id else "third_party"
             connection.execute(
                 "INSERT OR IGNORE INTO message_subjects(message_id,target_id,relation,attribution) VALUES (?,?,?,?)",
                 (message_db_id, target_id, relation, attribution),
@@ -578,11 +610,6 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
             connection.execute(
                 "INSERT OR IGNORE INTO import_items(batch_id,message_id,relation,selected) VALUES (?,?,?,1)",
                 (batch_id, message_db_id, relation),
-            )
-            connection.execute(
-                """INSERT INTO data_epochs(chat_id,target_id,epoch) VALUES (?, ?, 1)
-                   ON CONFLICT(chat_id,target_id) DO UPDATE SET epoch=epoch+1""",
-                (chat_id, target_id),
             )
             applied += 1
         for item in manual_items:
@@ -598,12 +625,22 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
                  item.get("source_url"), item.get("occurred_at"), hashlib.sha256(text.encode()).hexdigest()),
             )
             applied += 1
+        if applied:
+            _bump_epoch(connection, chat_id, target_id)
         connection.execute("UPDATE imports SET status='active' WHERE batch_id=? AND status='staged'", (batch_id,))
     return batch_id, applied
 
 
+def _bump_epoch(connection: sqlite3.Connection, chat_id: int, target_id: int) -> None:
+    connection.execute(
+        """INSERT INTO data_epochs(chat_id,target_id,epoch) VALUES (?, ?, 1)
+           ON CONFLICT(chat_id,target_id) DO UPDATE SET epoch=epoch+1""",
+        (chat_id, target_id),
+    )
+
+
 def rollback_import(database_path: Path, batch_id: str) -> int:
-    """Remove one batch's evidence, preserving message rows shared by other batches."""
+    """Remove batch-owned subjects; retain evidence owned by other targets/batches."""
     removed = 0
     with connect(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -615,32 +652,31 @@ def rollback_import(database_path: Path, batch_id: str) -> int:
         rows = connection.execute(
             "SELECT message_id,relation FROM import_items WHERE batch_id=?", (batch_id,)
         ).fetchall()
-        connection.execute("DELETE FROM manual_items WHERE batch_id=?", (batch_id,))
+        manual_count = connection.execute(
+            "DELETE FROM manual_items WHERE batch_id=?", (batch_id,)
+        ).rowcount
         connection.execute("DELETE FROM import_items WHERE batch_id=?", (batch_id,))
         for row in rows:
             message_id = row["message_id"]
             still_used = connection.execute(
-                "SELECT 1 FROM import_items WHERE message_id=? AND relation=? LIMIT 1",
-                (message_id, row["relation"]),
+                """SELECT 1 FROM import_items i JOIN imports b ON b.batch_id=i.batch_id
+                   WHERE i.message_id=? AND i.relation=? AND b.target_id=? AND b.status='active'
+                   LIMIT 1""",
+                (message_id, row["relation"], batch["target_id"]),
             ).fetchone()
             if still_used is None:
                 connection.execute(
-                    "DELETE FROM message_subjects WHERE message_id=? AND target_id=? AND relation=?",
-                    (message_id, batch["target_id"], row["relation"]),
+                    """DELETE FROM message_subjects WHERE message_id=? AND target_id=? AND relation=?
+                       AND EXISTS (SELECT 1 FROM messages WHERE id=? AND origin='export')""",
+                    (message_id, batch["target_id"], row["relation"], message_id),
                 )
-            if still_used is None:
-                shared = connection.execute("SELECT 1 FROM import_items WHERE message_id=? LIMIT 1", (message_id,)).fetchone()
-                message = connection.execute(
-                    "SELECT id FROM messages WHERE id=?", (message_id,)
-                ).fetchone()
-                if message and shared is None:
-                    connection.execute("DELETE FROM messages WHERE id=?", (message_id,))
-                    connection.execute(
-                        """INSERT INTO data_epochs(chat_id,target_id,epoch) VALUES (?, ?, 1)
-                           ON CONFLICT(chat_id,target_id) DO UPDATE SET epoch=epoch+1""",
-                        (batch["chat_id"], batch["target_id"]),
-                    )
-                    removed += 1
+            removed += connection.execute(
+                """DELETE FROM messages WHERE id=? AND origin='export'
+                   AND NOT EXISTS (SELECT 1 FROM import_items WHERE message_id=?)""",
+                (message_id, message_id),
+            ).rowcount
+        if rows or manual_count:
+            _bump_epoch(connection, batch["chat_id"], batch["target_id"])
         connection.execute("UPDATE imports SET status='rolled_back' WHERE batch_id=?", (batch_id,))
     return removed
 

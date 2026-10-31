@@ -240,6 +240,13 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
     if isinstance(thread_id, bool) or not isinstance(thread_id, int):
         thread_id = None
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    reply = message.get("reply_to_message")
+    reply_source_id = reply.get("message_id") if isinstance(reply, Mapping) else None
+    if type(reply_source_id) is not int or reply_source_id <= 0:
+        reply_source_id = None
+    if (isinstance(reply, Mapping) and isinstance(reply.get("chat"), Mapping)
+            and reply["chat"].get("id") != chat_id):
+        reply_source_id = None
     namespace = f"live:{chat_id}"
     existing = connection.execute(
         "SELECT id, text_hash, occurred_at FROM messages WHERE source_namespace = ? AND source_message_id = ?",
@@ -276,6 +283,8 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
             (thread_id, author_id, text, text_hash, date, edited_at, existing["id"]),
         )
     if should_rebuild_subjects:
+        connection.execute("UPDATE messages SET reply_source_id=? WHERE id=?",
+                           (reply_source_id, message_row_id))
         affected = _upsert_subjects(
             connection,
             message_row_id,
@@ -558,6 +567,9 @@ def _migrate_chat_scope(connection: sqlite3.Connection, old_chat_id: int, new_ch
                 "SELECT 1 FROM sessions WHERE chat_id = ? LIMIT 1",
                 "SELECT 1 FROM command_cooldowns WHERE chat_id = ? LIMIT 1",
                 "SELECT 1 FROM command_receipts WHERE chat_id = ? LIMIT 1",
+                "SELECT 1 FROM interaction_receipts WHERE chat_id = ? LIMIT 1",
+                "SELECT 1 FROM imports WHERE chat_id = ? LIMIT 1",
+                "SELECT 1 FROM source_chats WHERE destination_chat_id = ? LIMIT 1",
             )
         )
         if has_data or destination["enabled"]:
@@ -589,6 +601,11 @@ def _migrate_chat_scope(connection: sqlite3.Connection, old_chat_id: int, new_ch
     )
     connection.execute("UPDATE sessions SET chat_id = ? WHERE chat_id = ?", (new_chat_id, old_chat_id))
     connection.execute(
+        "UPDATE sessions SET state='closed',closed_reason='chat_migrated',revision=revision+1 "
+        "WHERE chat_id=? AND state='active'", (new_chat_id,)
+    )
+    connection.execute("UPDATE interaction_receipts SET chat_id=? WHERE chat_id=?", (new_chat_id, old_chat_id))
+    connection.execute(
         "UPDATE command_cooldowns SET chat_id = ? WHERE chat_id = ?", (new_chat_id, old_chat_id)
     )
     connection.execute(
@@ -598,6 +615,18 @@ def _migrate_chat_scope(connection: sqlite3.Connection, old_chat_id: int, new_ch
         "UPDATE messages SET scope_chat_id = ?, source_namespace = ? "
         "WHERE scope_chat_id = ? AND source_namespace = ?",
         (new_chat_id, f"live:{new_chat_id}", old_chat_id, f"live:{old_chat_id}"),
+    )
+    # Export namespaces identify the source, so only their destination scope moves.
+    connection.execute(
+        "UPDATE messages SET scope_chat_id=? WHERE scope_chat_id=?", (new_chat_id, old_chat_id)
+    )
+    connection.execute(
+        "UPDATE source_chats SET destination_chat_id=? WHERE destination_chat_id=?",
+        (new_chat_id, old_chat_id),
+    )
+    connection.execute(
+        "UPDATE imports SET chat_id=?, status=CASE WHEN status='staged' THEN 'expired' ELSE status END "
+        "WHERE chat_id=?", (new_chat_id, old_chat_id),
     )
     connection.execute("DELETE FROM members WHERE chat_id = ?", (old_chat_id,))
     connection.execute("DELETE FROM chats WHERE chat_id = ?", (old_chat_id,))

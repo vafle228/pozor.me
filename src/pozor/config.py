@@ -25,9 +25,21 @@ class Settings(BaseSettings):
     context_size: int = Field(default=8192, ge=512, le=131072)
     max_output_tokens: int = Field(default=180, ge=1, le=4096)
     generation_deadline_seconds: float = Field(default=8, gt=0, le=300)
+    historical_token_budget: int = Field(default=1200, ge=0, le=8192)
+    per_topic_limit: int = Field(default=2, ge=1, le=40)
+    retrieval_weights: tuple[float, float, float, float] = (1.0, .8, .5, .6)
     live_retention_days: int = Field(default=30, ge=1, le=3650)
     import_retention_days: int = Field(default=90, ge=1, le=3650)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @field_validator("retrieval_weights")
+    @classmethod
+    def valid_weights(cls, value: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        import math
+
+        if any(not math.isfinite(weight) or weight < 0 for weight in value):
+            raise ValueError("retrieval weights must be finite and nonnegative")
+        return value
 
     @field_validator("owner_ids", "chat_allowlist")
     @classmethod

@@ -144,11 +144,14 @@ def parse_command(
 ) -> ParsedCommand | None:
     """Parse a leading bot command and collect entity-backed username targets."""
     match = _COMMAND.match(text)
-    if match is None:
+    mention_call = None
+    if match is None and bot_username:
+        mention_call = re.match(r"^@" + re.escape(bot_username) + r"\s+попусти(?:\s|$)", text, re.IGNORECASE)
+    if match is None and mention_call is None:
         return None
-    name = match.group("name").casefold()
+    name = match.group("name").casefold() if match else "roast"
     # Do not interpret commands explicitly addressed to a different bot.
-    addressed_to = match.group("bot")
+    addressed_to = match.group("bot") if match else None
     if addressed_to is not None and (
         bot_username is None or addressed_to.casefold() != bot_username.casefold()
     ):
@@ -159,6 +162,8 @@ def parse_command(
         if entity.get("type") not in {"mention", "text_mention"}:
             continue
         offset, length = entity.get("offset"), entity.get("length")
+        if mention_call and offset == 0:
+            continue
         if type(offset) is not int or type(length) is not int:
             continue
         fragment = _utf16_slice(text, offset, length)
@@ -169,7 +174,7 @@ def parse_command(
                 numeric_targets.append(user_id)
         elif fragment and fragment.startswith("@") and re.fullmatch(r"@[A-Za-z0-9_]{5,32}", fragment):
             targets.append(fragment[1:].casefold())
-    consumed = match.end()
+    consumed = match.end() if match else mention_call.end()  # type: ignore[union-attr]
     return ParsedCommand(
         name,
         text[consumed:].strip(),
@@ -660,5 +665,5 @@ async def handle_telegram_update(
     if cursor.rowcount:
         await bot.send_message(
             chat_id=chat_id, text=response, message_thread_id=thread_id or None,
-            reply_markup=reply_markup,
+            reply_markup=reply_markup, parse_mode=None,
         )

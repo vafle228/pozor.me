@@ -76,6 +76,22 @@ def test_poll_persists_updates_and_offset_before_next_fetch(db_path: Path) -> No
     ]
 
 
+def test_t4_live_reply_link_persists_and_foreign_parent_is_rejected(db_path):
+    parent = _message_update(900, message_id=90)
+    child = _message_update(901, message_id=91)
+    child["message"]["reply_to_message"] = parent["message"]
+    _persist_batch(db_path, 999, [parent, child])
+    process_pending(db_path)
+    with connect(db_path) as db:
+        assert db.execute("SELECT reply_source_id FROM messages WHERE source_message_id=91").fetchone()[0] == 90
+    foreign = _message_update(902, message_id=92)
+    foreign["message"]["reply_to_message"] = _message_update(1, chat_id=-2000)["message"]
+    _persist_batch(db_path, 999, [foreign])
+    process_pending(db_path)
+    with connect(db_path) as db:
+        assert db.execute("SELECT reply_source_id FROM messages WHERE source_message_id=92").fetchone()[0] is None
+
+
 def test_disabled_chat_inbox_accepts_only_control_commands(db_path: Path) -> None:
     with connect(db_path) as connection:
         connection.execute("UPDATE chats SET enabled=0 WHERE chat_id=-1001")
