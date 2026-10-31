@@ -10,7 +10,7 @@ import os
 import secrets
 import sqlite3
 import time
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -118,7 +118,7 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                 expected = hmac.new(key, stamp.encode(), "sha256").hexdigest()
                 return 0 <= time.time() - int(stamp) < 28800 and hmac.compare_digest(
                     signature, expected)
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, CookieError):
                 return False
 
         def do_GET(self) -> None:
@@ -162,8 +162,8 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                 body = json.loads(self.rfile.read(size))
                 supplied = body.get("password") if isinstance(body, dict) else None
                 if not isinstance(supplied, str):
-                    raise ValueError
-            except (ValueError, json.JSONDecodeError):
+                    raise TypeError
+            except (ValueError, TypeError):
                 self.reply(400, b'{}')
                 return
             if not hmac.compare_digest(supplied.encode(), password.encode()):
