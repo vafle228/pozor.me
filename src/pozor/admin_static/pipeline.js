@@ -47,7 +47,7 @@ function showDrafts(drafts) {
   const kinds = {interest: "Интерес", story: "История", phrase: "Характерная фраза", habit: "Повторяющаяся привычка"};
   for (const draft of drafts) {
     const form = node("form", undefined, "review-draft");
-    form.append(node("h3", `Участник ${draft.target}`), node("p", `Проанализировано сообщений: ${draft.sampled}. Черновик действует 30 минут.`, "note"));
+    form.append(node("h3", draft.name || `Участник ${draft.target}`), node("p", `Проанализировано сообщений: ${draft.sampled}. Черновик действует 30 минут. Сохранение заменит предыдущие проверенные наблюдения этого участника.`, "note"));
     const controls = [];
     draft.observations.forEach((observation, index) => {
       const item = node("div", undefined, "card"), label = node("label"), selected = node("input"); selected.type = "checkbox"; selected.checked = true;

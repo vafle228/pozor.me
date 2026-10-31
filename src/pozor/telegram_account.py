@@ -163,6 +163,8 @@ class TelegramAccount:
 
     async def disconnect(self) -> None:
         await self.cancel_login()
+        if self.client is None and (self.directory / "account.session").exists():
+            await self.open()
         if self.client:
             try:
                 if not await self.client.log_out():

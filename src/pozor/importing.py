@@ -501,7 +501,8 @@ def _read_manifest(path: Path) -> tuple[dict[str, Any], str]:
     return manifest, hashlib.sha256(raw).hexdigest()
 
 
-def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | None = None) -> tuple[str, int]:
+def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | None = None,
+                 require_consent: bool = False) -> tuple[str, int]:
     """Revalidate file, destination, manifest, and mapping before atomic activation."""
     manifest, manifest_hash = _read_manifest(manifest_path)
     if manifest.get("parser_version") != PARSER_VERSION or manifest.get("policy_version") != POLICY_VERSION:
@@ -539,6 +540,10 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
     applied = 0
     with connect(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if require_consent:
+            from pozor.semantic_profiles import require_scope
+
+            require_scope(connection, chat_id, target_id)
         staged = connection.execute("SELECT * FROM imports WHERE batch_id=?", (batch_id,)).fetchone()
         if staged is None or staged["manifest_hash"] != manifest_hash:
             raise ImportErrorSafe("manifest is not the original staged preview")

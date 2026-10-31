@@ -86,8 +86,8 @@ class AdminPipeline:
         if action == "job":
             if self.drafts:
                 try:
-                    for draft in self.drafts:
-                        semantic_profiles.validate_draft(self.database, draft)
+                    for current_draft in self.drafts:
+                        semantic_profiles.validate_draft(self.database, current_draft)
                 except AccountError:
                     self.drafts.clear()
                     self.job = {"state": "expired", "message": "Источники изменились или черновик устарел."}
@@ -119,7 +119,8 @@ class AdminPipeline:
             self.task = asyncio.create_task(self.run(chat, targets, start, end))
             return self.job
         if action == "save":
-            draft = next((d for d in self.drafts if d["id"] == body.get("draft")), None)
+            draft: dict[str, Any] | None = next(
+                (d for d in self.drafts if d["id"] == body.get("draft")), None)
             if draft is None:
                 raise AccountError("Черновик не найден. Составьте профиль ещё раз.")
             selections = body.get("selections")
@@ -157,7 +158,7 @@ class AdminPipeline:
                         # Recheck consent immediately before activation, not only before download.
                         with connect(self.database) as db:
                             require_scope(db, chat, target)
-                        _, count = apply_import(self.database, manifest)
+                        _, count = apply_import(self.database, manifest, require_consent=True)
                         self.job["imported"] += count
                     finally:
                         file.unlink(missing_ok=True)
@@ -165,7 +166,12 @@ class AdminPipeline:
                 self.job.update(stage="analysis", target=target)
                 draft = await semantic_profiles.analyze(
                     self.database, self.settings, chat, target,
-                    lambda done, total: self.job.update(analyzed=done, sampled=total))
+                    lambda done, total: self.job.update(analyzed=done, sampled=total),
+                    since=start, until=end)
+                with connect(self.database) as db:
+                    member = db.execute("SELECT display_name FROM members WHERE chat_id=? AND user_id=?",
+                                        (chat, target)).fetchone()
+                    draft["name"] = member[0] if member else None
                 semantic_profiles.validate_draft(self.database, draft)
                 self.drafts.append(draft)
             self.job.update(state="review", stage="done")

@@ -40,3 +40,7 @@ target-version = "py312"
 python_version = "3.12"
 strict = true
 packages = ["pozor"]
+
+[[tool.mypy.overrides]]
+module = ["telethon.*", "qrcode.*"]
+ignore_missing_imports = true

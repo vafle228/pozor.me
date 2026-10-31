@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -54,13 +55,16 @@ def require_scope(db: Any, chat: int, target: int) -> None:
         raise AccountError("Нужны включённая группа и согласие участника (/roast_on).")
 
 
-def snapshot(database: Path, chat: int, target: int) -> tuple[int, list[dict[str, Any]]]:
+def snapshot(database: Path, chat: int, target: int, since: datetime | None = None,
+             until: datetime | None = None) -> tuple[int, list[dict[str, Any]]]:
     with connect(database) as db:
         db.execute("BEGIN")
         require_scope(db, chat, target)
         rows = db.execute("""SELECT m.* FROM messages m JOIN message_subjects s
             ON s.message_id=m.id WHERE m.scope_chat_id=? AND s.target_id=?
             AND m.author_id=? AND s.relation='self'
+            AND (? IS NULL OR julianday(m.occurred_at)>=julianday(?))
+            AND (? IS NULL OR julianday(m.occurred_at)<julianday(?))
             AND s.attribution IN ('observed_self','imported_quote')
             AND ((m.origin='live' AND julianday(m.occurred_at,'+' ||
                  (SELECT retention_days FROM chats WHERE chat_id=?) || ' days')>julianday('now'))
@@ -69,13 +73,17 @@ def snapshot(database: Path, chat: int, target: int) -> tuple[int, list[dict[str
                  AND ii.relation='self' AND i.status='active'
                  AND julianday(i.retained_until)>julianday('now')))
             ORDER BY m.occurred_at DESC,m.id DESC LIMIT 300""",
-                          (chat, target, target, chat, chat, target)).fetchall()
+                          (chat, target, target,
+                           since.isoformat() if since else None, since.isoformat() if since else None,
+                           until.isoformat() if until else None, until.isoformat() if until else None,
+                           chat, chat, target)).fetchall()
         return epoch(db, chat, target), [dict(row) for row in rows]
 
 
 async def analyze(database: Path, settings: Settings, chat: int, target: int,
-                  progress: Any) -> dict[str, Any]:
-    version, rows = await asyncio.to_thread(snapshot, database, chat, target)
+                  progress: Any, *, since: datetime | None = None,
+                  until: datetime | None = None) -> dict[str, Any]:
+    version, rows = await asyncio.to_thread(snapshot, database, chat, target, since, until)
     observations: list[dict[str, Any]] = []
     by_id = {r["id"]: r for r in rows}
     async with LlamaClient(settings) as client:
@@ -158,9 +166,12 @@ def save(database: Path, draft: dict[str, Any], selections: list[dict[str, Any]]
     with connect(database) as db:
         db.execute("BEGIN IMMEDIATE")
         validate_in_transaction(db, draft)
+        db.execute("DELETE FROM profile_cards WHERE chat_id=? AND target_id=? AND profile_version=2",
+                   (draft["chat"], draft["target"]))
         for item in accepted:
             sources = item["sources"]
-            digest = hashlib.sha256(json.dumps(sorted(item["source_ids"])).encode()).hexdigest()[:16]
+            digest = hashlib.sha256(json.dumps(
+                [item["topic"], sorted(item["source_ids"])]).encode()).hexdigest()[:16]
             topic = f"semantic:{item['kind']}:{digest}"
             db.execute("DELETE FROM profile_cards WHERE chat_id=? AND target_id=? AND topic=?",
                        (draft["chat"], draft["target"], topic))
