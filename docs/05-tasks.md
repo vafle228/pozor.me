@@ -80,11 +80,40 @@ Dependency graph: **T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7**. Не�
 
 Ограничения: HTTP уже in-flight при stop может доставить сообщение; exactly-once не обещается. Epoch-контракт forget проверен без реализации `/forget_me` — это T6, как и cards, purge turns/inputs/outbox и human eval. Реальные GPU/Telegram smoke и latency остаются непроверенными. Подробные состояния, failure semantics и передача следующему исполнителю — в [контракте T5](07-t5-delivery.md).
 
+**Контрольная точка T5 — ревью (2026-10-31):** исправлены повтор retrieval после
+таймаута, повторное использование inputs отменённой попытки, блокировка других
+чатов локальным sender cooldown, обход scope-проверок ранними health notices,
+вызов `@bot попусти` без mention entity и сетевой admin lookup перед stop участника.
+Подробности — в [контракте T5](07-t5-delivery.md). Добавлено 14 регрессионных cases.
+Полный offline suite: **193 passed** (`--basetemp=.test-tmp/t5-review-final`);
+Ruff на `src/pozor` и `tests/test_delivery.py`, mypy `src/pozor`, `git diff --check`
+проходят. Pytest выполнен вне Windows sandbox из-за зависания asyncio в sandbox.
+Реальные Telegram/GPU не запускались; границы T6 сохранены.
+
 ## T6 — портрет, удаление, оценка
 
 Результат: quote-backed cards, background watermark, invalidation, TTL cleanup, `/forget_me`, `profile show`, eval suite/benchmark report. Карточки могут быть выключены без поломки direct retrieval.
 
 Приёмка: third-party не повышается до self, 3 соседние реплики не «3 эпизода», отсутствующий source инвалидирует card, import TTL от даты импорта, FTS/inbox/outbox/staging очищаются, opt-out переживает reimport. Оценка 30 кейсов с evidence coverage и latency; качество юмора оценивает человек, не только сама LLM.
+
+**Статус T6 (2026-10-31): автоматическая часть реализована, пакет не закрыт.**
+Миграция 0008, extractive quote-backed cards, background watermark/token budget,
+invalidation, TTL cleanup, `/forget_me` с tombstone и отменой pending delivery,
+`profile show`, 30 синтетических eval cases и offline benchmark report добавлены.
+Карточки опциональны, работают через исходные evidence IDs; semantic LLM extractor
+сознательно заменён точными цитатами без свободных утверждений о человеке.
+Контрольная точка T5 включена в изменения.
+
+Проверено: **215 passed** (`.venv\Scripts\python -m pytest -q --basetemp=.test-tmp/t6-release`),
+Ruff `src/pozor` и изменённых тестов, mypy `src/pozor`, `git diff --check`.
+Offline CLI benchmark: 30/30 cases, candidate evidence coverage 1.0; это не замер
+использования цитат реальной моделью. `uv build --offline --cache-dir .uv-cache
+--out-dir .test-tmp/t6-dist` собрал wheel/sdist, проверены ресурсы wheel.
+Pytest/build/CLI benchmark выполнялись вне Windows sandbox из-за ограничений
+asyncio/socketpair и PE resources. Реальные Telegram/GPU/веса не использовались.
+Human humor/safety gate, model latency, concurrency и VRAM остаются непроверенными.
+Передача и ограничения: [T6](08-t6-profiles-privacy-eval.md),
+[offline report](../reports/t6-benchmark.json). T7 не реализовывался.
 
 ## T7 — эксплуатация и финальный smoke
 

@@ -8,7 +8,7 @@
 
 **pozor.me** — проект локального Telegram-бота для контекстной прожарки в группе. Бот должен находить относящиеся к разговору реплики и отвечать коротко и остроумно, опираясь на подтверждённые сообщения и выбранную историю человека.
 
-> **Статус:** T0–T5 реализованы с offline acceptance: SQLite, ingestion, команды/сессии, импорт, inference/retrieval и вертикальная интеграция с guarded outbox/sender. `pozor run` подключает реальные Telegram Bot API и локальный llama.cpp. Реальные Telegram/GPU smoke и оценка качества T6 не проводились.
+> **Статус:** T0–T5 реализованы с offline acceptance. T6 добавляет цитатные карточки, удаление и offline eval; пакет **не закрыт** до ручной оценки качества и замеров локальной модели. `pozor run` подключает реальные Telegram Bot API и локальный llama.cpp. Реальные Telegram/GPU smoke не проводились. [Статус и передача T6](docs/08-t6-profiles-privacy-eval.md).
 
 ## Задача и границы
 
@@ -69,6 +69,16 @@ uv run pozor --help
 `uv run pozor llm smoke` — отдельная opt-in проверка уже запущенного локального llama.cpp: health, alias модели, один slot, размер контекста, tokenizer и structured non-thinking completion на синтетической вводной. Веса не скачивает, в Telegram не пишет. Порядок подключения T4 к T5 описан в [контракте T4](docs/06-t4-inference.md).
 
 ## Название и команды
+
+T6: `/forget_me` удаляет данные участника в текущей группе и запрещает восстановление
+импортом до явного `/roast_on`. `/roast_off` только выключает участие. Локально:
+`pozor profile show --chat <id> --target <id>`, `pozor db cleanup`,
+`pozor benchmark --suite tests/fixtures/eval.jsonl --output reports/t6-benchmark.json`.
+Benchmark по умолчанию offline; `--live --repeat 3` явно включает уже запущенный
+локальный llama.cpp на синтетических данных. Telegram не используется.
+Карточки включаются через `PROFILE_CARDS_ENABLED=true`; direct retrieval работает
+при выключенных карточках. Фоновая сборка использует настоящий tokenizer llama.cpp,
+но сохраняет только точные цитаты, без LLM-пересказа.
 
 `pozor.me` — название проекта, а не допустимый username Telegram. Для регистрации понадобится свободное имя вида `@pozor_me_bot`, созданное через BotFather; такое имя в документации приведено как пример.
 

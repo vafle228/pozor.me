@@ -233,6 +233,10 @@ def _namespace(source_chat_id: int) -> str:
 
 def _validate_scope(database_path: Path, chat_id: int, target_id: int) -> bool:
     with connect(database_path) as connection:
+        from pozor.privacy import blocked
+
+        if blocked(connection, chat_id, target_id):
+            raise ImportErrorSafe("target requested forgetting; explicit /roast_on required")
         chat = connection.execute(
             "SELECT allowed FROM chats WHERE chat_id=?", (chat_id,)
         ).fetchone()
@@ -561,6 +565,10 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
         if expected_source != staged["source_hash"]:
             raise ImportErrorSafe("staged source hash changed")
 
+        from pozor.privacy import blocked
+
+        if blocked(connection, chat_id, target_id):
+            raise ImportErrorSafe("target requested forgetting; explicit /roast_on required")
         for item in messages:
             if not isinstance(item, dict):
                 raise ImportErrorSafe("malformed normalized message")
@@ -572,6 +580,8 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
                 raise ImportErrorSafe("malformed normalized message fields")
             if relation not in {"self", "mention", "reply", "context"}:
                 raise ImportErrorSafe("invalid imported relation")
+            if type(author_id) is int and blocked(connection, chat_id, author_id):
+                raise ImportErrorSafe("source author requested forgetting")
             text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             source_message_id = mid
             parent = item.get("reply_source_id")
@@ -627,7 +637,11 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
             applied += 1
         if applied:
             _bump_epoch(connection, chat_id, target_id)
-        connection.execute("UPDATE imports SET status='active' WHERE batch_id=? AND status='staged'", (batch_id,))
+        from pozor.config import Settings
+
+        retained = current + timedelta(days=Settings().import_retention_days)
+        connection.execute("UPDATE imports SET status='active',retained_until=? "
+                           "WHERE batch_id=? AND status='staged'", (retained.isoformat(), batch_id))
     return batch_id, applied
 
 

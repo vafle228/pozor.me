@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     retrieval_weights: tuple[float, float, float, float] = (1.0, .8, .5, .6)
     live_retention_days: int = Field(default=30, ge=1, le=3650)
     import_retention_days: int = Field(default=90, ge=1, le=3650)
+    profile_cards_enabled: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     @field_validator("retrieval_weights")

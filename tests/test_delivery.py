@@ -565,3 +565,129 @@ async def test_queue_busy_before_start_does_not_open_session(scope):
     release.set()
     await asyncio.gather(active, pending)
     await p.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retrieval_timeout_is_terminal(scope, monkeypatch):
+    from pozor import delivery
+
+    p, db, _, bot, generator = scope
+    attempts = []
+
+    def timed_out(*args, **kwargs):
+        attempts.append(1)
+        raise TimeoutError
+
+    monkeypatch.setattr(delivery, "retrieve", timed_out)
+    start(scope)
+    try:
+        await asyncio.wait_for(generated(p), 2)
+        assert attempts == [1]
+        assert state(db, "turns")[0]["status"] == "failed"
+        assert state(db, "turns")[0]["deadline"] is not None
+        assert generator.packs == []
+        assert not await p.send_once()
+        assert bot.calls == []
+    finally:
+        await p.aclose()
+
+
+@pytest.mark.asyncio
+async def test_edited_input_is_not_reused_on_next_address(scope):
+    p, db, clock, _, generator = scope
+    sid = start(scope)
+    await generated(p)
+    await p.send_once()
+    clock.now += 11
+    assert p.accept(sid, 2, "текст до редактирования", first=True)
+    await generated(p)
+    await p.handle_message({"edited_message": {"message_id": 2, "chat": {"id": -1001}}}, None)
+    assert state(db, "turns")[-1]["status"] == "cancelled"
+    assert p.accept(sid, 3, "новое обращение", first=True)
+    await generated(p)
+    assert generator.packs[-1].trigger.text == "новое обращение"
+    assert await p.send_once()
+    await p.aclose()
+
+
+@pytest.mark.asyncio
+async def test_chat_cooldown_does_not_block_other_chats(scope):
+    p, db, clock, bot, _ = scope
+    start(scope)
+    await generated(p)
+    with connect(db) as con:
+        con.execute("INSERT INTO chats(chat_id,allowed,enabled) VALUES (-2002,1,1)")
+        con.execute("INSERT INTO members(chat_id,user_id,consent) VALUES (-2002,42,1)")
+        con.execute("INSERT INTO delivery_limits VALUES ('chat:-1001',?)", (clock() + 3,))
+    sid = start_session(db, chat_id=-2002, thread_id=0, target_id=42, initiator_id=43,
+                        trigger_message_id=1, now=int(clock()))
+    assert p.accept(sid, 1, "другая группа", first=True)
+    await generated(p)
+    assert await p.send_once()
+    assert [call["chat_id"] for call in bot.calls] == [-2002]
+    assert state(db)[0]["status"] == "ready"
+    await p.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["disabled", "unlisted", "private", "bot", "anonymous"])
+async def test_unavailable_notice_respects_scope_and_sender(scope, case):
+    p, db, clock, bot, _ = scope
+    p.ready = False
+    payload = incoming(clock, text="/roast", actor=43)
+    if case in {"disabled", "unlisted"}:
+        with connect(db) as con:
+            con.execute("UPDATE chats SET " + ("enabled" if case == "disabled" else "allowed") + "=0")
+    elif case == "private":
+        payload["message"]["chat"]["type"] = "private"
+    elif case == "bot":
+        payload["message"]["from"]["is_bot"] = True
+    else:
+        payload["message"]["sender_chat"] = {"id": -1001}
+    await p.handle_update(payload, bot_id=99, bot_username="pozor_me_bot", owner_ids=frozenset())
+    assert bot.calls == []
+    assert state(db, "sessions") == []
+    await p.aclose()
+
+
+@pytest.mark.parametrize("entities", [(), ({"type": "mention", "offset": 0, "length": 3},)])
+def test_mention_command_requires_bot_entity(entities):
+    from pozor.commands import parse_command
+
+    assert parse_command("@pozor_me_bot попусти @target_one", entities,
+                         bot_username="pozor_me_bot") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", [42, 43])
+@pytest.mark.parametrize("command", ["/stop", "/finish"])
+async def test_participant_stop_never_waits_for_admin_lookup(scope, actor, command):
+    p, db, clock, bot, _ = scope
+    start(scope)
+    await generated(p)
+
+    async def unavailable(**kwargs):
+        pytest.fail("Participant stop must not need a network authorization lookup")
+
+    bot.get_chat_member = unavailable
+    await p.handle_update(incoming(clock, actor=actor, text=command), bot_id=99,
+                          bot_username="pozor_me_bot", owner_ids=frozenset())
+    assert state(db, "sessions")[0]["state"] == "closed"
+    assert not await p.send_once()
+    await p.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forget_during_inference_purges_and_cancels_without_resurrection(scope):
+    p, db, clock, bot, generator = scope
+    generator.release.clear()
+    start(scope)
+    await generator.entered.wait()
+    await p.handle_update(incoming(clock, actor=42, mid=2, text='/forget_me'),
+                          bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
+    generator.release.set()
+    await generated(p)
+    assert state(db, 'turns') == state(db, 'turn_inputs') == state(db, 'outbox') == []
+    assert not await p.send_once()
+    assert len(bot.calls) == 1 and 'удалены' in bot.calls[0]['text']
+    await p.aclose()

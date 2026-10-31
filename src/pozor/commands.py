@@ -147,6 +147,12 @@ def parse_command(
     mention_call = None
     if match is None and bot_username:
         mention_call = re.match(r"^@" + re.escape(bot_username) + r"\s+попусти(?:\s|$)", text, re.IGNORECASE)
+        if mention_call and not any(
+            e.get("type") == "mention" and e.get("offset") == 0
+            and e.get("length") == len(bot_username) + 1
+            for e in entities
+        ):
+            mention_call = None
     if match is None and mention_call is None:
         return None
     name = match.group("name").casefold() if match else "roast"
@@ -551,6 +557,13 @@ async def handle_telegram_update(
     reply_user_id = reply_user.get("id") if isinstance(reply_user, dict) else None
     reply_is_bot = bool(reply_user.get("is_bot")) if isinstance(reply_user, dict) else False
     sender_is_anonymous = bool(raw.get("sender_chat"))
+    if sender_is_anonymous and parsed.name in {'forget_me', 'roast_on', 'roast_off'}:
+        return
+    from pozor.privacy import blocked
+
+    with connect(database_path) as connection:
+        if blocked(connection, chat_id, actor_id) and parsed.name not in {'forget_me', 'roast_on'}:
+            return
     context = CommandContext(
         chat_id, actor_id, message_id, thread_id, text, entities,
         reply_user_id if type(reply_user_id) is int else None, reply_is_bot,
@@ -566,12 +579,14 @@ async def handle_telegram_update(
             """INSERT INTO members(chat_id,user_id,display_name,current_username,last_seen)
                SELECT ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')
                WHERE EXISTS (SELECT 1 FROM chats WHERE chat_id=? AND allowed=1)
+               AND NOT EXISTS (SELECT 1 FROM forgotten_members WHERE chat_id=? AND user_id=?)
                ON CONFLICT(chat_id,user_id) DO UPDATE SET
                  display_name=excluded.display_name,current_username=excluded.current_username,
                  last_seen=excluded.last_seen""",
-            (chat_id, actor_id, display_name or None, username if isinstance(username, str) else None, chat_id),
+            (chat_id, actor_id, display_name or None, username if isinstance(username, str) else None,
+             chat_id, chat_id, actor_id),
         )
-        if isinstance(username, str) and username:
+        if isinstance(username, str) and username and not blocked(connection, chat_id, actor_id):
             current = connection.execute(
                 "SELECT id, username FROM aliases WHERE chat_id=? AND user_id=? AND valid_to IS NULL",
                 (chat_id, actor_id),
@@ -611,13 +626,28 @@ async def handle_telegram_update(
             "/whois — ответом на сообщение; /roast_on, /roast_off — согласие участника;\n"
             "/roast @username или ответом на сообщение — начать сессию; /stop, /finish — завершить."
         )
+        response += "\n/roast_off выключает участие; /forget_me удаляет данные этой группы."
     elif parsed.name == "whois":
         if context.reply_user_id is None or context.reply_is_bot:
             response = "Используйте /whois ответом на сообщение участника."
         else:
             response = whois(database_path, chat_id, context.reply_user_id) or "Участник ещё не наблюдался в этом чате."
+    elif parsed.name == "forget_me":
+        from pozor.privacy import forget
+
+        with connect(database_path) as connection:
+            permitted = _command_allowed(connection, chat_id, require_enabled=False)
+        if not sender_is_anonymous and permitted:
+            forget(database_path, chat_id, actor_id)
+            response = "Данные в этой группе удалены, участие выключено. /roast_on разрешит новый сбор и импорт."
+        else:
+            return
     elif parsed.name in {"roast_on", "roast_off"}:
         if set_consent(database_path, chat_id, actor_id, parsed.name == "roast_on"):
+            if parsed.name == "roast_on":
+                with connect(database_path) as connection:
+                    connection.execute("DELETE FROM forgotten_members WHERE chat_id=? AND user_id=?",
+                                       (chat_id, actor_id))
             response = "Участие включено для этого чата." if parsed.name == "roast_on" else "Участие выключено; активные сессии завершены."
         else:
             response = "Сначала оператор должен включить этот чат."
@@ -643,16 +673,22 @@ async def handle_telegram_update(
                     response = str(exc)
     elif parsed.name in {"stop", "finish"}:
         admin = actor_id in owner_ids
-        if not admin:
+        # Target/initiator authorization is local: stop must not wait for Telegram.
+        closed = close_session(
+            database_path, session_id=None, chat_id=chat_id, thread_id=thread_id,
+            actor_id=actor_id, is_admin=admin,
+        )
+        if not closed and not admin:
             try:
                 member = await bot.get_chat_member(chat_id=chat_id, user_id=actor_id)
                 admin = member.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR)
             except TelegramAPIError:
                 admin = False
-        closed = close_session(
-            database_path, session_id=None, chat_id=chat_id, thread_id=thread_id,
-            actor_id=actor_id, is_admin=admin,
-        )
+            if admin:
+                closed = close_session(
+                    database_path, session_id=None, chat_id=chat_id, thread_id=thread_id,
+                    actor_id=actor_id, is_admin=True,
+                )
         response = "Сессия завершена." if closed else "Нет доступной вам активной сессии в этой теме."
     else:
         return

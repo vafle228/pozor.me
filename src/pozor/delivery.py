@@ -27,7 +27,7 @@ from pozor.commands import (
     parse_command,
 )
 from pozor.config import Settings
-from pozor.context import ContextPack, retrieve
+from pozor.context import ContextPack, retrieve, sources_current
 from pozor.inference_queue import InferenceQueue, QueueBusy
 from pozor.llm import GenerationResult, InferenceError
 from pozor.storage import connect
@@ -67,7 +67,9 @@ def guard(db: sqlite3.Connection, turn: sqlite3.Row, now: float) -> bool:
                 and turn["turn_no"] == row["turn_count"] + 1 and row["turn_count"] < 4
                 and now < row["created_at"] + 300
                 and (row["last_sent_at"] is None or now < row["last_sent_at"] + 90)
-                and (turn["deadline"] is None or now < turn["deadline"]))
+                and (turn["deadline"] is None or now < turn["deadline"])
+                and sources_current(db, row['chat_id'], row['target_id'],
+                                    json.loads(turn['evidence_ids']) if turn['evidence_ids'] else [], now))
 
 
 def cancel_turn(db: sqlite3.Connection, session_id: str, turn_no: int) -> None:
@@ -94,6 +96,11 @@ class DeliveryPipeline:
     async def notify(self, chat_id: int, thread_id: int, text: str) -> None:
         # Shared cooldown for queue-full and health notices. No archive/prompt in logs.
         now = self.clock()
+        with connect(self.database) as db:
+            allowed = db.execute("SELECT 1 FROM chats WHERE chat_id=? AND allowed=1 AND enabled=1",
+                                 (chat_id,)).fetchone()
+        if not allowed:
+            return
         if now < self.notice_at.get(chat_id, 0):
             return
         self.notice_at[chat_id] = now + 30
@@ -132,6 +139,9 @@ class DeliveryPipeline:
             revision = s["revision"] + 1
             db.execute("UPDATE sessions SET revision=? WHERE id=?", (revision, session_id))
             if old:
+                if old["status"] in {"cancelled", "failed"}:
+                    db.execute("DELETE FROM turn_inputs WHERE session_id=? AND turn_no=?",
+                               (session_id, number))
                 cancel_turn(db, session_id, number)
                 db.execute("UPDATE turns SET revision=?,evidence_epoch=NULL,deadline=NULL,"
                            "status='pending',text=NULL,evidence_ids=NULL,context_hash=NULL "
@@ -175,6 +185,10 @@ class DeliveryPipeline:
                 deadline = asyncio.get_running_loop().time() + self.settings.generation_deadline_seconds
                 wall_deadline = self.clock() + self.settings.generation_deadline_seconds
                 revision, number = turn["revision"], turn["turn_no"]
+                with connect(self.database) as db:
+                    db.execute("UPDATE turns SET deadline=? WHERE session_id=? AND turn_no=? "
+                               "AND revision=? AND status='pending'",
+                               (wall_deadline, session_id, number, revision))
                 try:
                     async with asyncio.timeout_at(deadline):
                         pack = await asyncio.to_thread(
@@ -182,6 +196,7 @@ class DeliveryPipeline:
                             target_id=s["target_id"], trigger_id=inputs[-1]["source_message_id"],
                             hint="\n".join(r["text"] for r in inputs), target_label=f"user_id={s['target_id']}",
                             weights=self.settings.retrieval_weights,
+                            cards_enabled=self.settings.profile_cards_enabled,
                         )
                         pack = pack.model_copy(update={"session_turns": memory})
                         with connect(self.database) as db:
@@ -191,7 +206,7 @@ class DeliveryPipeline:
                                        (pack.evidence_epoch, wall_deadline, session_id, number, revision))
                             current = db.execute("SELECT * FROM turns WHERE session_id=? AND turn_no=?",
                                                  (session_id, number)).fetchone()
-                            if (current["revision"] != revision or current["status"] != "queued"
+                            if (current is None or current["revision"] != revision or current["status"] != "queued"
                                     or not guard(db, current, self.clock())):
                                 continue
                         result: GenerationResult = await self.queue.submit(
@@ -207,7 +222,7 @@ class DeliveryPipeline:
                         await self.notify(s["chat_id"], s["thread_id"], "Сейчас занят. Попробуйте позже.")
                     with connect(self.database) as db:
                         db.execute("UPDATE turns SET status='failed' WHERE session_id=? AND turn_no=? "
-                                   "AND revision=? AND status IN ('queued','generating')", (session_id, number, revision))
+                                   "AND revision=? AND status IN ('pending','queued','generating')", (session_id, number, revision))
                 with connect(self.database) as db:
                     pending = db.execute("SELECT 1 FROM turns WHERE session_id=? AND status='pending'",
                                          (session_id,)).fetchone()
@@ -225,7 +240,9 @@ class DeliveryPipeline:
             db.execute("BEGIN IMMEDIATE")
             turn = db.execute("SELECT * FROM turns WHERE session_id=? AND turn_no=?", (sid, number)).fetchone()
             if (turn is None or turn["revision"] != revision or turn["status"] != "queued"
-                    or not guard(db, turn, self.clock())):
+                    or not guard(db, turn, self.clock())
+                    or not sources_current(db, pack.chat_id, pack.target_id,
+                                           [e.evidence_id for e in [*pack.recent, *pack.evidence]], self.clock())):
                 raise InferenceError("stale_before_inference")
             db.execute("UPDATE turns SET status='generating' WHERE session_id=? AND turn_no=?", (sid, number))
         return await self.generator.generate(pack, deadline)
@@ -236,6 +253,10 @@ class DeliveryPipeline:
             turn = db.execute("SELECT * FROM turns WHERE session_id=? AND turn_no=?", (sid, number)).fetchone()
             if (turn is None or turn["revision"] != revision or turn["status"] != "generating"
                     or not guard(db, turn, self.clock())):
+                return False
+            session = db.execute('SELECT chat_id,target_id FROM sessions WHERE id=?', (sid,)).fetchone()
+            if not sources_current(db, session['chat_id'], session['target_id'],
+                                   result.roast.evidence_ids, self.clock()):
                 return False
             db.execute("UPDATE turns SET status='ready',text=?,evidence_ids=?,context_hash=?,token_count=? "
                        "WHERE session_id=? AND turn_no=?", (result.roast.text, json.dumps(result.roast.evidence_ids),
@@ -249,6 +270,19 @@ class DeliveryPipeline:
         """Cheap periodic guards also notice edits/rollback from the local import CLI."""
         with connect(self.database) as db:
             db.execute("BEGIN IMMEDIATE")
+            for key in list(self.queue.keys):
+                if key.startswith('profile:'):
+                    _, chat, target = key.split(':')
+                    member = db.execute('SELECT 1 FROM members m WHERE chat_id=? AND user_id=? '
+                                        'AND consent=1 AND opt_out=0 AND NOT EXISTS '
+                                        '(SELECT 1 FROM forgotten_members f WHERE f.chat_id=m.chat_id '
+                                        'AND f.user_id=m.user_id)', (int(chat), int(target))).fetchone()
+                    if not member:
+                        self.queue.cancel(key)
+            for sid in list(self.jobs):
+                active = db.execute("SELECT 1 FROM sessions WHERE id=? AND state='active'", (sid,)).fetchone()
+                if not active:
+                    self.queue.cancel(f"session:{sid}")
             for turn in db.execute("SELECT * FROM turns WHERE status IN ('pending','queued','generating','ready')").fetchall():
                 if not guard(db, turn, self.clock()):
                     cancel_turn(db, turn["session_id"], turn["turn_no"])
@@ -261,8 +295,11 @@ class DeliveryPipeline:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT t.*,s.chat_id,s.thread_id FROM outbox o "
                              "JOIN turns t USING(session_id,turn_no) JOIN sessions s ON s.id=o.session_id "
-                             "WHERE o.status='ready' AND o.next_attempt_at<=? ORDER BY o.next_attempt_at LIMIT 1",
-                             (now,)).fetchone()
+                             "WHERE o.status='ready' AND o.next_attempt_at<=? "
+                             "AND NOT EXISTS (SELECT 1 FROM delivery_limits l "
+                             "WHERE l.scope='chat:' || s.chat_id AND l.next_at>?) "
+                             "ORDER BY o.next_attempt_at LIMIT 1",
+                             (now, now)).fetchone()
             if row is None:
                 return False
             sid, number, chat_id = row["session_id"], row["turn_no"], row["chat_id"]
@@ -345,11 +382,17 @@ class DeliveryPipeline:
                     or abs(self.clock() - timestamp) > 30):
                 return
             text = raw.get("text")
-            parsed = parse_command(text, bot_username=bot_username) if isinstance(text, str) else None
+            entities_raw = raw.get("entities")
+            entities = tuple(e for e in entities_raw if isinstance(e, dict)) if isinstance(entities_raw, list) else ()
+            parsed = parse_command(text, entities, bot_username=bot_username) if isinstance(text, str) else None
             busy = self.queue.closed or sum(len(q) for q in self.queue.chats.values()) >= self.queue.capacity
             if parsed and parsed.name == "roast" and (not self.ready or busy):
                 chat = raw.get("chat")
-                if isinstance(chat, dict) and type(chat.get("id")) is int:
+                actor = raw.get("from")
+                if (isinstance(chat, dict) and type(chat.get("id")) is int
+                        and chat.get("type") in {"group", "supergroup"}
+                        and isinstance(actor, dict) and type(actor.get("id")) is int
+                        and not actor.get("is_bot") and not raw.get("sender_chat")):
                     await self.notify(chat["id"], int(raw.get("message_thread_id") or 0),
                                       "Генерация пока недоступна. Попробуйте позже." if not self.ready
                                       else "Сейчас занят. Попробуйте позже.")

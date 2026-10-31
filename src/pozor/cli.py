@@ -1,6 +1,7 @@
 """Command-line entry point. Network-dependent polling is explicitly opt-in."""
 
 import asyncio
+import json
 import uuid
 from pathlib import Path
 
@@ -24,6 +25,40 @@ import_app = typer.Typer(help="Локальный preview и применени�
 app.add_typer(import_app, name="import")
 llm_app = typer.Typer(help="Opt-in диагностика локального llama.cpp")
 app.add_typer(llm_app, name="llm")
+profile_app = typer.Typer(help="Локальные карточки с исходными цитатами")
+app.add_typer(profile_app, name="profile")
+
+
+@profile_app.command("show")
+def profile_show(chat: int = typer.Option(...), target: int = typer.Option(...)) -> None:
+    from pozor.profiles import show
+
+    typer.echo(json.dumps(show(Settings().database_path, chat, target), ensure_ascii=False, indent=2))
+
+
+@app.command("benchmark")
+def run_benchmark(
+    suite: Path = typer.Option(..., exists=True, dir_okay=False),  # noqa: B008
+    output: Path = typer.Option(Path('benchmark-report.json')),  # noqa: B008
+    repeat: int = typer.Option(1, min=1),
+    live: bool = typer.Option(False, help="Explicitly contact local llama.cpp; synthetic cases only"),
+) -> None:
+    from pozor.evaluation import benchmark
+
+    report = asyncio.run(benchmark(suite, live=live, repeat=repeat))
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    typer.echo(f"OK report: {output}; human review pending")
+    if not report['retrieval_pass']:
+        raise typer.Exit(1)
+
+
+@db_app.command("cleanup")
+def db_cleanup() -> None:
+    from pozor.privacy import cleanup
+
+    settings = Settings()
+    cleanup(settings.database_path, import_days=settings.import_retention_days)
+    typer.echo("OK retention cleanup")
 
 
 @llm_app.command("smoke")
