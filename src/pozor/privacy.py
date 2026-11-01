@@ -28,6 +28,7 @@ def bump(db: sqlite3.Connection, chat: int, target: int) -> None:
 
 
 def purge_sessions(db: sqlite3.Connection, chat: int) -> None:
+    db.execute("DELETE FROM generations WHERE chat_id=?", (chat,))
     # Any session in this group may contain a quote about the removed person.
     db.execute(
         "UPDATE sessions SET state='closed',closed_reason='purge',revision=revision+1 "
@@ -146,6 +147,7 @@ def cleanup(database: Path, *, now: datetime | None = None, import_days: int = 9
     if current.tzinfo is None or import_days < 1:
         raise ValueError("invalid retention arguments")
     with connect(database) as db:
+        db.execute("DELETE FROM generations WHERE created_at < strftime('%s','now')-604800")
         batches = db.execute(
             "SELECT batch_id FROM imports WHERE status='active' AND "
             "julianday(coalesce(retained_until,datetime(created_at,?)))<=julianday(?)",

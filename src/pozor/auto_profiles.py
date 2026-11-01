@@ -27,8 +27,8 @@ async def refresh(database: Path, settings: Settings, queue: InferenceQueue,
     with connect(database) as db:
         old = db.execute('SELECT * FROM automatic_profiles WHERE chat_id=? AND target_id=?',
                          (chat, target)).fetchone()
-        has_dossier = db.execute('SELECT 1 FROM profile_cards WHERE chat_id=? AND target_id=? '
-                                 'AND profile_version=4', (chat, target)).fetchone()
+        has_dossier = db.execute('SELECT 1 FROM profile_items WHERE chat_id=? AND target_id=? '
+                                 "AND kind='dossier'", (chat, target)).fetchone()
         if (old and old['signature'] == signature
                 and (old['state'] in {'empty', 'insufficient'} or old['state'] == 'ready' and has_dossier)):
             return False
@@ -71,6 +71,9 @@ async def refresh(database: Path, settings: Settings, queue: InferenceQueue,
                        (actual_signature, draft['message_id'], time.time(),
                         'ready' if selections or semantic_profiles.retained_observations(database, chat, target)
                         else 'empty', chat, target))
+        from pozor.infra.sqlite.hook_repo import refresh_hooks
+        if settings.humor_v2_enabled:
+            await refresh_hooks(database,settings,queue,chat,target)
         logger.info('Automatic portrait complete: sampled=%s observations=%s', draft['sampled'], len(selections))
         return True
     except asyncio.CancelledError:

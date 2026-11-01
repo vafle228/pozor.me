@@ -14,6 +14,7 @@ from pozor.config import Settings
 from pozor.context import ContextPack, Evidence
 from pozor.doctor import run_checks
 from pozor.importing import ImportErrorSafe, apply_import, preview_import, rollback_import
+from pozor.infra.config.service import SettingsService
 from pozor.ingestion import ChatMigrationConflict, PollingConflictError
 from pozor.llm import Generator, InferenceError, LlamaClient
 from pozor.logging import configure_logging
@@ -21,6 +22,88 @@ from pozor.runtime import run_telegram
 from pozor.storage import MigrationError, migrate
 
 app = typer.Typer(help="Локальный Telegram-бот pozor.me", no_args_is_help=True)
+config_app = typer.Typer(help="Настройки, их владельцы и источники")
+app.add_typer(config_app, name="config")
+
+
+@app.command("serve")
+def serve_all() -> None:
+    """Бот, админка и фоновые задачи с одной очередью GPU."""
+    from pozor.app.runtime import serve
+    try:
+        asyncio.run(serve(Settings()))
+    except (ValueError, ValidationError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+
+
+@app.command("admin")
+def admin_only() -> None:
+    """Только админка; не запускайте одновременно с serve на той же БД."""
+    from pozor.app.runtime import serve
+    try:
+        asyncio.run(serve(Settings(),admin_only=True))
+    except (ValueError, ValidationError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+
+
+def config_service() -> "SettingsService":
+    from pozor.infra.config.service import SettingsService
+    settings = Settings()
+    migrate(settings.database_path)
+    return SettingsService(settings)
+
+
+@config_app.command("show")
+def config_show() -> None:
+    typer.echo(json.dumps(config_service().describe(),ensure_ascii=False,indent=2))
+
+
+@config_app.command("set")
+def config_set(name: str, value: str) -> None:
+    try:
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = value
+        config_service().set(name.lower(),parsed)
+    except (ValueError, ValidationError):
+        typer.echo('Недопустимое значение или ключ не принадлежит runtime.',err=True)
+        raise typer.Exit(1) from None
+    typer.echo('Сохранено. Применится к следующему запросу.')
+
+
+@config_app.command("reset")
+def config_reset(name: str) -> None:
+    config_service().reset(name.lower())
+    typer.echo('Переопределение снято.')
+
+
+@config_app.command("where")
+def config_where() -> None:
+    from pozor.infra.config.paths import config_home
+    typer.echo(str(config_home()/'.env'))
+
+
+@config_app.command("template")
+def config_template(check: bool = False) -> None:
+    from pozor.infra.config.paths import config_home
+    from pozor.infra.config.service import template
+    content = template()
+    if check:
+        path = config_home()/'.env.example'
+        if not path.exists() or path.read_text('utf-8') != content:
+            typer.echo('.env.example устарел: pozor config template > .env.example',err=True)
+            raise typer.Exit(1)
+    else:
+        typer.echo(content,nl=False)
+
+
+@config_app.command("check")
+def config_check() -> None:
+    config_service().snapshot()
+    typer.echo('Настройки валидны.')
 db_app = typer.Typer(help="Локальная база данных")
 app.add_typer(db_app, name="db")
 import_app = typer.Typer(help="Локальный preview и применение импорта")

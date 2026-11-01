@@ -171,7 +171,7 @@ def test_deployment_checks_file_hashes_configuration_and_missing_baseline(tmp_pa
     lock.write_text(json.dumps({
         'schema_version': 1, 'llama_cpp_build': 'synthetic-build', 'llama_cpp_artifact': artifact(server),
         'model': artifact(model) | {'repo': 'synthetic/repo', 'revision': 'a' * 40, 'alias': 'pozor-local'},
-        'runtime': {'context_size': 8192, 'slots': 1, 'enable_thinking': False, 'max_output_tokens': 180},
+        'runtime': {'context_size': 8192, 'slots': 1, 'enable_thinking': False, 'max_output_tokens': 600},
     }))
     settings = Settings(_env_file=None)
     check_artifacts(lock, model, server, settings)

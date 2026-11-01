@@ -104,18 +104,13 @@ def snapshot(database: Path, chat: int, target: int, since: datetime | None = No
     with connect(database) as db:
         db.execute("BEGIN")
         require_scope(db, chat, target)
-        rows = db.execute("""SELECT m.* FROM messages m JOIN message_subjects s
+        rows = db.execute("""SELECT m.* FROM messages m JOIN v_entitled_messages s
             ON s.message_id=m.id WHERE m.scope_chat_id=? AND s.target_id=?
             AND m.author_id=? AND s.relation='self'
             AND (? IS NULL OR julianday(m.occurred_at)>=julianday(?))
             AND (? IS NULL OR julianday(m.occurred_at)<julianday(?))
             AND s.attribution IN ('observed_self','imported_quote')
-            AND ((m.origin='live' AND julianday(m.occurred_at,'+' ||
-                 (SELECT retention_days FROM chats WHERE chat_id=?) || ' days')>julianday('now'))
-                 OR EXISTS (SELECT 1 FROM import_items ii JOIN imports i USING(batch_id)
-                 WHERE ii.message_id=m.id AND i.chat_id=? AND i.target_id=?
-                 AND ii.relation='self' AND i.status='active'
-                 AND julianday(i.retained_until)>julianday('now')))
+            AND s.valid_until>julianday('now')
             AND m.text NOT LIKE '/%'
             AND NOT EXISTS (SELECT 1 FROM turn_inputs ti JOIN sessions sess ON sess.id=ti.session_id
                 WHERE sess.chat_id=m.scope_chat_id AND ti.source_message_id=m.source_message_id
@@ -123,8 +118,7 @@ def snapshot(database: Path, chat: int, target: int, since: datetime | None = No
             ORDER BY m.occurred_at DESC,m.id DESC LIMIT 3000""",
                           (chat, target, target,
                            since.isoformat() if since else None, since.isoformat() if since else None,
-                           until.isoformat() if until else None, until.isoformat() if until else None,
-                           chat, chat, target)).fetchall()
+                           until.isoformat() if until else None, until.isoformat() if until else None)).fetchall()
         return epoch(db, chat, target), [dict(row) for row in rows
             if profile_material(row['text'])][:300]
 
@@ -214,9 +208,9 @@ def retained_observations(database: Path, chat: int, target: int) -> list[dict[s
         db.execute('BEGIN')
         require_scope(db, chat, target)
         result = []
-        for card in db.execute('SELECT * FROM profile_cards WHERE chat_id=? AND target_id=? '
-                               'AND profile_version IN (2,3) AND excluded=0 ORDER BY id', (chat, target)):
-            sources = [dict(r) for r in db.execute('SELECT m.*,ce.source_text_hash FROM card_evidence ce '
+        for card in db.execute('SELECT * FROM profile_items WHERE chat_id=? AND target_id=? '
+                               "AND provenance IN ('reviewed','automatic') AND excluded=0 ORDER BY id", (chat, target)):
+            sources = [dict(r) for r in db.execute('SELECT m.*,ce.source_text_hash FROM profile_item_sources ce '
                 'JOIN messages m ON m.id=ce.message_id WHERE ce.card_id=?', (card['id'],))]
             ids = [r['id'] for r in sources]
             if (not sources or any(r['author_id'] != target or r['text_hash'] != r['source_text_hash']
@@ -225,7 +219,7 @@ def retained_observations(database: Path, chat: int, target: int) -> list[dict[s
                 continue
             item = {'topic': card['topic'], 'kind': 'story', 'summary': card['summary'],
                     'source_ids': ids, 'sources': sources}
-            if card['profile_version'] == 2 or grounded_observation(item):
+            if card['provenance'] == 'reviewed' or grounded_observation(item):
                 result.append(item)
         return result
 
@@ -335,7 +329,7 @@ def save(database: Path, draft: dict[str, Any], selections: list[dict[str, Any]]
         db.execute("BEGIN IMMEDIATE")
         validate_in_transaction(db, draft)
         if not automatic:
-            db.execute("DELETE FROM profile_cards WHERE chat_id=? AND target_id=? AND profile_version=2",
+            db.execute("DELETE FROM profile_items WHERE chat_id=? AND target_id=? AND provenance='reviewed'",
                        (draft["chat"], draft["target"]))
         for item in accepted:
             sources = item["sources"]
@@ -343,40 +337,40 @@ def save(database: Path, draft: dict[str, Any], selections: list[dict[str, Any]]
                 [normalize(item['summary']), sorted(item["source_ids"])]).encode()).hexdigest()[:16]
             topic = f"{'auto' if automatic else 'semantic'}:{item['kind']}:{digest}"
             if automatic:
-                existing = db.execute('SELECT id,profile_version,excluded FROM profile_cards WHERE chat_id=? '
-                    'AND target_id=? AND profile_version IN (2,3) AND summary=?',
+                existing = db.execute('SELECT id,provenance,excluded FROM profile_items WHERE chat_id=? '
+                    "AND target_id=? AND provenance IN ('reviewed','automatic') AND summary=?",
                     (draft['chat'], draft['target'], item['summary'])).fetchone()
                 if existing:
-                    if existing['excluded'] or existing['profile_version'] == 2:
+                    if existing['excluded'] or existing['provenance'] == 'reviewed':
                         continue
-                    old_ids = {r[0] for r in db.execute('SELECT message_id FROM card_evidence WHERE card_id=?',
+                    old_ids = {r[0] for r in db.execute('SELECT message_id FROM profile_item_sources WHERE card_id=?',
                                                       (existing['id'],))}
                     if old_ids == set(item['source_ids']):
                         continue
-                    db.execute('DELETE FROM profile_cards WHERE id=?', (existing['id'],))
-            db.execute("DELETE FROM profile_cards WHERE chat_id=? AND target_id=? AND topic=?",
+                    db.execute('DELETE FROM profile_items WHERE id=?', (existing['id'],))
+            db.execute("DELETE FROM profile_items WHERE chat_id=? AND target_id=? AND topic=?",
                        (draft["chat"], draft["target"], topic))
-            cursor = db.execute("""INSERT INTO profile_cards(chat_id,target_id,topic,summary,
-                attribution,kind,first_at,last_at,episodes,profile_version)
+            cursor = db.execute("""INSERT INTO profile_items(chat_id,target_id,topic,summary,
+                attribution,source_kind,first_at,last_at,episodes,provenance)
                 VALUES (?,?,?,?,'imported_quote','imported_quote',?,?,?,?)""",
                 (draft["chat"], draft["target"], topic, item["summary"],
                  min(s["occurred_at"] for s in sources), max(s["occurred_at"] for s in sources),
-                 len(sources), 3 if automatic else 2))
+                 len(sources), 'automatic' if automatic else 'reviewed'))
             for source in sources:
-                db.execute("INSERT INTO card_evidence VALUES (?,?,?)",
+                db.execute("INSERT INTO profile_item_sources VALUES (?,?,?)",
                            (cursor.lastrowid, source["id"], source["text_hash"]))
         if automatic:
-            db.execute('DELETE FROM profile_cards WHERE chat_id=? AND target_id=? AND profile_version=4',
+            db.execute("DELETE FROM profile_items WHERE chat_id=? AND target_id=? AND kind='dossier'",
                        (draft['chat'], draft['target']))
             if draft.get('dossier'):
                 item = draft['dossier']
                 sources = item['sources']
-                cursor = db.execute('''INSERT INTO profile_cards(chat_id,target_id,topic,summary,
-                    attribution,kind,first_at,last_at,episodes,profile_version)
-                    VALUES (?,?,'dossier',?,'imported_quote','imported_quote',?,?,?,4)''',
+                cursor = db.execute('''INSERT INTO profile_items(chat_id,target_id,topic,summary,
+                    attribution,source_kind,first_at,last_at,episodes,provenance,kind)
+                    VALUES (?,?,'dossier',?,'imported_quote','imported_quote',?,?,?,'automatic','dossier')''',
                     (draft['chat'], draft['target'], item['summary'],
                      min(s['occurred_at'] for s in sources), max(s['occurred_at'] for s in sources), len(sources)))
                 for source in sources:
-                    db.execute('INSERT INTO card_evidence VALUES (?,?,?)',
+                    db.execute('INSERT INTO profile_item_sources VALUES (?,?,?)',
                                (cursor.lastrowid, source['id'], source['text_hash']))
     return len(accepted)

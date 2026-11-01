@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
 import logging
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +16,7 @@ from telethon import errors
 from pozor import semantic_profiles
 from pozor.config import Settings
 from pozor.importing import apply_import, preview_import
+from pozor.inference_queue import InferenceQueue
 from pozor.llm import InferenceError
 from pozor.semantic_profiles import require_scope
 from pozor.storage import connect
@@ -27,25 +26,15 @@ logger = logging.getLogger(__name__)
 
 
 class AdminPipeline:
-    def __init__(self, database: Path, settings: Settings):
+    def __init__(self, database: Path, settings: Settings, queue: InferenceQueue | None = None):
         self.database = database.resolve()
         self.settings = settings
         self.account = TelegramAccount(settings, self.database.parent / "telegram")
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
-        self.thread.start()
+        self.queue = queue
         self.lock: asyncio.Lock | None = None
         self.task: asyncio.Task[None] | None = None
         self.job: dict[str, Any] = {"state": "idle"}
         self.drafts: list[dict[str, Any]] = []
-
-    def call(self, action: str, body: dict[str, Any] | None = None) -> Any:
-        future = asyncio.run_coroutine_threadsafe(self.dispatch(action, body or {}), self.loop)
-        try:
-            return future.result(timeout=10)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            raise AccountError("Telegram не ответил вовремя. Повторите попытку.") from None
 
     async def dispatch(self, action: str, body: dict[str, Any]) -> Any:
         if self.lock is None:
@@ -214,13 +203,16 @@ class AdminPipeline:
                 draft = await semantic_profiles.analyze(
                     self.database, self.settings, chat, target,
                     lambda done, total: self.job.update(analyzed=done, sampled=total),
-                    since=start, until=end)
+                    since=start, until=end, queue=self.queue)
                 with connect(self.database) as db:
                     member = db.execute("SELECT display_name FROM members WHERE chat_id=? AND user_id=?",
                                         (chat, target)).fetchone()
                     draft["name"] = member[0] if member else None
                 semantic_profiles.validate_draft(self.database, draft)
                 self.drafts.append(draft)
+                if self.queue is not None:
+                    from pozor.infra.sqlite.hook_repo import refresh_hooks
+                    await refresh_hooks(self.database,self.settings,self.queue,chat,target)
             self.job.update(state="review", stage="done")
         except asyncio.CancelledError:
             self.drafts.clear()
@@ -250,14 +242,6 @@ class AdminPipeline:
         self.drafts.clear()
         self.job = {"state": "cancelled", "message": "Черновики очищены; импортированные цитаты сохранены."}
 
-    def close(self) -> None:
-        async def shutdown() -> None:
-            await self.cancel()
-            await self.account.close()
-        try:
-            asyncio.run_coroutine_threadsafe(shutdown(), self.loop).result(timeout=10)
-        finally:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join(timeout=10)
-            if not self.thread.is_alive():
-                self.loop.close()
+    async def aclose(self) -> None:
+        await self.cancel()
+        await self.account.close()

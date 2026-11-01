@@ -40,17 +40,33 @@ class TelegramAccount:
         self.state = "disconnected"
         self.qr: str | None = None
         self.entities: dict[int, Any] = {}
+        self.credentials_source = "env"
+
+    def credentials(self) -> tuple[int | None, str | None]:
+        path = self.directory.parent / "secrets.local.json"
+        legacy = self.directory / "application.json"
+        for source in (path, legacy):
+            if source.exists():
+                try:
+                    saved = json.loads(source.read_text("utf-8"))
+                    api_id, api_hash = saved["api_id"], saved["api_hash"]
+                    if type(api_id) is not int or api_id <= 0 or not isinstance(api_hash, str) or len(api_hash) != 32:
+                        raise ValueError
+                except (ValueError, KeyError, TypeError):
+                    raise AccountError("Повреждён файл реквизитов Telegram. Сохраните их заново.") from None
+                if source == legacy:
+                    private_write(path, json.dumps(saved))
+                    legacy.unlink()
+                self.credentials_source = "admin"
+                return api_id, api_hash
+        self.credentials_source = "env"
+        return (self.settings.telegram_api_id,
+                self.settings.telegram_api_hash.get_secret_value() if self.settings.telegram_api_hash else None)
 
     async def open(self) -> None:
         if self.client is not None:
             return
-        api_id = self.settings.telegram_api_id
-        api_hash = (self.settings.telegram_api_hash.get_secret_value()
-                    if self.settings.telegram_api_hash else None)
-        credentials = self.directory / "application.json"
-        if not (api_id and api_hash) and credentials.exists():
-            saved = json.loads(credentials.read_text("utf-8"))
-            api_id, api_hash = saved["api_id"], saved["api_hash"]
+        api_id, api_hash = self.credentials()
         if not (api_id and api_hash):
             raise AccountError("Укажите API ID и API Hash приложения Telegram.")
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -72,19 +88,19 @@ class TelegramAccount:
                 await self.open()
             except AccountError:
                 pass
+        api_id, api_hash = self.credentials()
         return {"state": self.state, "qr": self.qr,
-                "configured": bool(self.settings.telegram_api_id and self.settings.telegram_api_hash)
-                or (self.directory / "application.json").exists()}
+                "configured": bool(api_id and api_hash), "credentials_source": self.credentials_source}
 
     async def start(self, api_id: int | None = None, api_hash: str | None = None) -> dict[str, Any]:
-        if self.state == "connected":
+        if self.state == "connected" and api_id is None and not api_hash:
             return await self.status()
         if api_id is not None or api_hash:
             if (type(api_id) is not int or api_id <= 0 or not isinstance(api_hash, str)
                     or len(api_hash) != 32 or any(c not in "0123456789abcdefABCDEF" for c in api_hash)):
                 raise AccountError("Проверьте API ID и API Hash.")
             await self.close()
-            private_write(self.directory / "application.json",
+            private_write(self.directory.parent / "secrets.local.json",
                           json.dumps({"api_id": api_id, "api_hash": api_hash}))
         await self.open()
         if self.state == "connected":
@@ -192,6 +208,7 @@ class TelegramAccount:
         for suffix in ("", "-journal", "-wal", "-shm"):
             (self.directory / f"account.session{suffix}").unlink(missing_ok=True)
         (self.directory / "application.json").unlink(missing_ok=True)
+        (self.directory.parent / "secrets.local.json").unlink(missing_ok=True)
         self.state, self.qr = "disconnected", None
         self.entities.clear()
 

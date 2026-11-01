@@ -27,15 +27,9 @@ def source_rows(
 ) -> list[sqlite3.Row]:
     return db.execute(
         """SELECT m.*,s.attribution,s.relation FROM messages m
-        JOIN message_subjects s ON s.message_id=m.id
+        JOIN v_entitled_messages s ON s.message_id=m.id
         WHERE m.scope_chat_id=? AND s.target_id=? AND m.id>?
-        AND s.relation IN ('self','mention','reply') AND
-        ((m.origin='live' AND julianday(m.occurred_at,
-         '+' || (SELECT retention_days FROM chats WHERE chat_id=m.scope_chat_id) || ' days')
-         >julianday('now')) OR EXISTS (SELECT 1 FROM import_items ii JOIN imports i
-         ON i.batch_id=ii.batch_id WHERE ii.message_id=m.id AND i.target_id=s.target_id
-         AND i.chat_id=m.scope_chat_id AND ii.relation=s.relation AND i.status='active'
-         AND julianday(i.retained_until)>julianday('now')))
+        AND s.relation IN ('self','mention','reply') AND s.valid_until>julianday('now')
         GROUP BY m.id ORDER BY m.id LIMIT 40""",
         (chat, target, after),
     ).fetchall()
@@ -91,8 +85,8 @@ def commit_batch(
             topic = hashlib.sha256(f"{text}:{attr}:{author}".encode()).hexdigest()[:24]
             # Keep a bounded set of original sources across batches, never resummarize archive.
             old = db.execute(
-                "SELECT m.*,s.attribution,s.relation FROM card_evidence ce "
-                "JOIN profile_cards c ON c.id=ce.card_id JOIN messages m ON m.id=ce.message_id "
+                "SELECT m.*,s.attribution,s.relation FROM profile_item_sources ce "
+                "JOIN profile_items c ON c.id=ce.card_id JOIN messages m ON m.id=ce.message_id "
                 "JOIN message_subjects s ON s.message_id=m.id AND s.target_id=c.target_id "
                 "WHERE c.chat_id=? AND c.target_id=? AND c.topic=?",
                 (chat, target, topic),
@@ -118,17 +112,17 @@ def commit_batch(
                 else ("imported_quote" if attr == "imported_quote" else "third_party_joke")
             )
             old_card = db.execute(
-                "SELECT excluded FROM profile_cards WHERE chat_id=? AND target_id=? AND topic=?",
+                "SELECT excluded FROM profile_items WHERE chat_id=? AND target_id=? AND topic=?",
                 (chat, target, topic),
             ).fetchone()
             excluded = old_card[0] if old_card else 0
             db.execute(
-                "DELETE FROM profile_cards WHERE chat_id=? AND target_id=? AND topic=?",
+                "DELETE FROM profile_items WHERE chat_id=? AND target_id=? AND topic=?",
                 (chat, target, topic),
             )
             cursor = db.execute(
-                "INSERT INTO profile_cards(chat_id,target_id,topic,summary,attribution,"
-                "kind,first_at,last_at,episodes,excluded) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO profile_items(chat_id,target_id,topic,summary,attribution,"
+                "source_kind,first_at,last_at,episodes,excluded) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     chat,
                     target,
@@ -144,7 +138,7 @@ def commit_batch(
             )
             for row in selected:
                 db.execute(
-                    "INSERT INTO card_evidence VALUES (?,?,?)",
+                    "INSERT INTO profile_item_sources VALUES (?,?,?)",
                     (cursor.lastrowid, row["id"], row["text_hash"]),
                 )
         db.execute(
@@ -163,12 +157,12 @@ def show(database: Path, chat: int, target: int) -> list[dict[str, Any]]:
             return []
         result = []
         for row in db.execute(
-            "SELECT * FROM profile_cards WHERE chat_id=? AND target_id=? ORDER BY id",
+            "SELECT * FROM profile_items WHERE chat_id=? AND target_id=? ORDER BY id",
             (chat, target),
         ).fetchall():
             sources = db.execute(
                 "SELECT ce.message_id,ce.source_text_hash,m.text_hash,m.origin "
-                "FROM card_evidence ce JOIN messages m ON m.id=ce.message_id "
+                "FROM profile_item_sources ce JOIN messages m ON m.id=ce.message_id "
                 "WHERE ce.card_id=?",
                 (row["id"],),
             ).fetchall()

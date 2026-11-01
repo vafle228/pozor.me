@@ -17,7 +17,7 @@ def test_settings_defaults_and_example_token_are_safe() -> None:
     settings = Settings(_env_file=None, bot_token="replace_me")
 
     assert settings.bot_token is None
-    assert settings.database_path.as_posix() == "data/pozor.sqlite3"
+    assert settings.database_path.is_absolute() and settings.database_path.name == "pozor.sqlite3"
     assert "replace_me" not in repr(settings)
 
 

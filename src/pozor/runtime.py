@@ -6,7 +6,10 @@ import asyncio
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pozor.app.container import Container
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramConflictError
@@ -16,15 +19,13 @@ from pozor.auto_profiles import automatic_profile_loop
 from pozor.commands import expire_sessions
 from pozor.config import Settings
 from pozor.delivery import DeliveryPipeline, health_loop, recover_delivery
-from pozor.inference_queue import InferenceQueue
 from pozor.ingestion import (
     PollingConflictError,
     run_poller,
 )
-from pozor.llm import Generator, LlamaClient
 from pozor.privacy import cleanup
 from pozor.profiles import profile_loop
-from pozor.storage import migrate
+from pozor.storage import connect, migrate
 
 
 class AiogramUpdateSource:
@@ -47,7 +48,12 @@ class AiogramUpdateSource:
             ) from exc
 
 
-async def run_telegram(settings: Settings) -> None:
+async def run_telegram(settings: Settings, container: Container | None = None) -> None:
+    if container is None:
+        from pozor.app.container import Container
+        async with Container(settings) as owned:
+            await run_telegram(settings,owned)
+        return
     """Migrate storage, sync configured scope, and run one real Bot API poller."""
     bot_token = settings.bot_token
     if bot_token is None:
@@ -55,7 +61,8 @@ async def run_telegram(settings: Settings) -> None:
     database_path: Path = settings.database_path
     migrate(database_path)
     recover_delivery(database_path)
-    async with Bot(token=bot_token.get_secret_value()) as bot, LlamaClient(settings) as client:
+    async with Bot(token=bot_token.get_secret_value()) as bot:
+        client = container.client
         identity = await bot.get_me()
         await bot.set_my_commands(commands=[BotCommand(command=name, description=description)
             for name, description in (
@@ -70,9 +77,11 @@ async def run_telegram(settings: Settings) -> None:
                 ("enable_chat", "Включить чат (администратор)"),
                 ("disable_chat", "Выключить чат (администратор)"),
             )], scope=BotCommandScopeAllGroupChats())
+        with connect(database_path) as db:
+            db.execute('INSERT OR IGNORE INTO bot_identities VALUES (?)',(identity.id,))
         source = AiogramUpdateSource(bot)
-        pipeline = DeliveryPipeline(database_path, settings, bot, Generator(client),
-                                    InferenceQueue(client.wait_idle, background_timeout=60))
+        pipeline = DeliveryPipeline(database_path,settings,bot,container.generator,container.queue)
+        pipeline.settings_service = container.service
 
         async def cleanup_loop() -> None:
             while True:

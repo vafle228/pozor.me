@@ -75,7 +75,7 @@ def scope(tmp_path):
         db.execute("INSERT INTO chats(chat_id,allowed,enabled) VALUES (-1001,1,1)")
         db.execute("INSERT INTO members(chat_id,user_id,consent) VALUES (-1001,42,1),(-1001,43,1)")
     clock, bot, generator = Clock(), Bot(), FakeGenerator()
-    pipeline = DeliveryPipeline(database, Settings(_env_file=None), bot, generator,
+    pipeline = DeliveryPipeline(database, Settings(_env_file=None, humor_v2_enabled=False), bot, generator,
                                 InferenceQueue(idle), clock=clock)
     pipeline.ready = True
     return pipeline, database, clock, bot, generator
@@ -178,7 +178,7 @@ async def test_stale_results_never_send(scope, tmp_path, cause, stage):
     elif cause == "rollback":
         rollback_import(db, batch)
     elif cause == "deadline":
-        clock.now += 9
+        clock.now += 13
     else:
         with connect(db) as con:
             if cause == "disable":

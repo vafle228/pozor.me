@@ -21,7 +21,31 @@ dependencies = [
 
 [project.optional-dependencies]
 imports = ["ijson>=3.4,<4"]
-dev = ["mypy>=1.17,<2", "pytest>=8.4,<9", "pytest-asyncio>=1.1,<2", "ruff>=0.12,<1"]
+dev = ["mypy>=1.17,<2", "pytest>=8.4,<9", "pytest-asyncio>=1.1,<2", "ruff>=0.12,<1", "poethepoet>=0.37,<1", "import-linter>=2.5,<3", "pytest-cov>=6,<8"]
+
+[dependency-groups]
+dev = ["mypy>=1.17,<2", "pytest>=8.4,<9", "pytest-asyncio>=1.1,<2", "ruff>=0.12,<1", "poethepoet>=0.37,<1", "import-linter>=2.5,<3", "pytest-cov>=6,<8"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.poe.tasks]
+lint = "python -m ruff check src tests"
+types = "python -m mypy src/pozor"
+imports = "lint-imports"
+test = "python -m pytest -q"
+fmt = "python -m ruff format src tests"
+check = ["lint", "types", "imports", "test"]
+
+[tool.importlinter]
+root_package = "pozor"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Core depends only on domain and ports"
+type = "forbidden"
+source_modules = ["pozor.core"]
+forbidden_modules = ["pozor.infra", "pozor.presentation", "pozor.app", "pozor.storage", "pozor.config", "pozor.context", "pozor.llm", "aiogram", "telethon", "sqlite3", "httpx", "pydantic_settings", "os"]
 
 [project.scripts]
 pozor = "pozor.cli:app"

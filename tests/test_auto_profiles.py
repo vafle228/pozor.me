@@ -80,7 +80,7 @@ async def test_build_existing_messages_then_refresh_threshold(database, model):
     try:
         assert await refresh(database, settings, queue, -1, 42)
         data = AdminData(database).read('/api/profiles', {'chat': ['-1']})['profiles'][0]
-        assert {card['profile_version'] for card in data['cards']} == {3, 4}
+        assert {card['kind'] for card in data['cards']} == {'observation','dossier'}
         assert data['automatic']['state'] == 'ready'
         assert data['automatic']['analyzed'] == 10
         release(database)
@@ -123,7 +123,7 @@ async def test_error_keeps_previous_portrait_and_backs_off(database, model, monk
         monkeypatch.setattr(semantic_profiles, 'analyze', fail)
         assert not await refresh(database, Settings(), queue, -1, 42)
         with connect(database) as db:
-            assert db.execute('SELECT count(*) FROM profile_cards').fetchone()[0] == 2
+            assert db.execute('SELECT count(*) FROM profile_items').fetchone()[0] == 2
             assert db.execute('SELECT state FROM automatic_profiles').fetchone()[0] == 'error'
         assert not await refresh(database, Settings(), queue, -1, 42)
     finally:
@@ -144,7 +144,7 @@ async def test_forget_during_analysis_cannot_save(database, model, monkeypatch):
     try:
         assert not await refresh(database, Settings(), queue, -1, 42)
         with connect(database) as db:
-            assert db.execute('SELECT count(*) FROM profile_cards').fetchone()[0] == 0
+            assert db.execute('SELECT count(*) FROM profile_items').fetchone()[0] == 0
             assert db.execute('SELECT count(*) FROM automatic_profiles').fetchone()[0] == 0
     finally:
         await queue.aclose()
@@ -206,12 +206,12 @@ async def test_automatic_refresh_retains_old_facts_and_dossier_reaches_roast(dat
     try:
         assert await refresh(database, Settings(), queue, -1, 42)
         with connect(database) as db:
-            db.execute("UPDATE profile_cards SET summary='Рассказал о первом шахматном турнире' WHERE profile_version=3")
+            db.execute("UPDATE profile_items SET summary='Рассказал о первом шахматном турнире' WHERE provenance='automatic'")
         release(database)
         add(database, 11, 20)
         assert await refresh(database, Settings(), queue, -1, 42)
         with connect(database) as db:
-            assert db.execute("SELECT 1 FROM profile_cards WHERE summary='Рассказал о первом шахматном турнире'").fetchone()
+            assert db.execute("SELECT 1 FROM profile_items WHERE summary='Рассказал о первом шахматном турнире'").fetchone()
         pack = retrieve(database, chat_id=-1, thread_id=0, target_id=42,
                         trigger_id=100, hint='Шахматы', target_label='Участник')
         assert pack.dossier and pack.dossier[0].evidence_ids

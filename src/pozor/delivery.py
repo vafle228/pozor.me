@@ -34,6 +34,9 @@ from pozor.commands import (
 from pozor.config import Settings
 from pozor.context import ContextPack, ConversationTurn, retrieve, sources_current
 from pozor.inference_queue import InferenceQueue, QueueBusy
+from pozor.infra.config.service import SettingsService
+from pozor.infra.sqlite.generation_repo import GenerationRepository
+from pozor.infra.sqlite.hook_repo import select_hooks
 from pozor.llm import GenerationResult, InferenceError
 from pozor.storage import connect
 from pozor.telegram_scope import topic_id
@@ -92,6 +95,8 @@ class DeliveryPipeline:
     ) -> None:
         self.database, self.settings, self.bot = database, settings, bot
         self.generator, self.queue, self.clock = generator, queue, clock
+        self.generation_log = GenerationRepository(database)
+        self.settings_service: SettingsService | None = None
         self.ready = False
         self.jobs: dict[str, asyncio.Task[None]] = {}
         self.due: dict[str, tuple[float, float]] = {}
@@ -182,6 +187,7 @@ class DeliveryPipeline:
                 if scope:
                     typing = asyncio.create_task(self._typing(scope['chat_id'], scope['thread_id']))
             while not self.stopping:
+                settings = await asyncio.to_thread(self.settings_service.snapshot) if self.settings_service else self.settings
                 delay = self.due[session_id][1] - asyncio.get_running_loop().time()
                 if delay > 0:
                     await asyncio.sleep(min(delay, .1))
@@ -209,8 +215,8 @@ class DeliveryPipeline:
                         if not previous['fallback']:
                             conversation.append(ConversationTurn(role='assistant', text=previous['text']))
                 # Absolute deadline includes retrieval, queue, tokenization and validation.
-                deadline = asyncio.get_running_loop().time() + self.settings.generation_deadline_seconds
-                wall_deadline = self.clock() + self.settings.generation_deadline_seconds
+                deadline = asyncio.get_running_loop().time() + settings.generation_deadline_seconds
+                wall_deadline = self.clock() + settings.generation_deadline_seconds
                 revision, number = turn["revision"], turn["turn_no"]
                 with connect(self.database) as db:
                     db.execute("UPDATE turns SET deadline=? WHERE session_id=? AND turn_no=? "
@@ -223,10 +229,16 @@ class DeliveryPipeline:
                             target_id=s["target_id"], trigger_id=inputs[-1]["source_message_id"],
                             hint="\n".join(r["text"] for r in inputs),
                             target_label=member['display_name'] if member and member['display_name'] else 'Участник',
-                            weights=self.settings.retrieval_weights,
-                            cards_enabled=self.settings.profile_cards_enabled,
+                            weights=settings.retrieval_weights,
+                            cards_enabled=settings.profile_cards_enabled, min_terms=settings.retrieval_min_terms,
                         )
-                        pack = pack.model_copy(update={"session_turns": memory, "mode": s["mode"],
+                        angles, previous_answers, used_sources, examples = await asyncio.to_thread(
+                            self.generation_log.memory, s['chat_id'], s['target_id'])
+                        hooks = await asyncio.to_thread(select_hooks,self.database,s['chat_id'],s['target_id'],
+                            pack.trigger.text,min(settings.roast_level,s['roast_level']),used_sources)
+                        pack = pack.model_copy(update={"session_turns": list(dict.fromkeys([*previous_answers,*memory])), "mode": s["mode"],
+                            "forbidden_angles": angles, "few_shot": examples, "hooks": hooks,
+                            "level": min(settings.roast_level,s["roast_level"]),
                             "conversation": conversation, "initiator_id": s['initiator_id'],
                             "speaker_id": inputs[-1]['author_id'],
                             "trigger": pack.trigger.model_copy(update={'author_id': inputs[-1]['author_id']})})
@@ -250,6 +262,8 @@ class DeliveryPipeline:
                         raise
                 except (TimeoutError, InferenceError, QueueBusy) as exc:
                     reason = 'deadline' if isinstance(exc, TimeoutError) else str(exc)
+                    if reason.startswith('stale_'):
+                        return
                     logger.warning('generation_failed reason=%s', reason)
                     if isinstance(exc, QueueBusy):
                         await self.notify(s["chat_id"], s["thread_id"], "Сейчас занят. Попробуйте позже.")
@@ -299,7 +313,21 @@ class DeliveryPipeline:
                                            [eid for memory in pack.dossier for eid in memory.evidence_ids], self.clock())):
                 raise InferenceError("stale_before_inference")
             db.execute("UPDATE turns SET status='generating' WHERE session_id=? AND turn_no=?", (sid, number))
-        return await self.generator.generate(pack, deadline)
+        if pack.mode == 'roast':
+            limit = self.settings_service.snapshot().target_daily_round_limit if self.settings_service else self.settings.target_daily_round_limit
+            with connect(self.database) as db:
+                sent = db.execute("SELECT coalesce(sum(turn_count),0) FROM sessions WHERE chat_id=? AND target_id=? "
+                    "AND mode='roast' AND created_at>?",(pack.chat_id,pack.target_id,self.clock()-86400)).fetchone()[0]
+            if sent >= limit:
+                raise InferenceError('daily_round_limit')
+        started = asyncio.get_running_loop().time()
+        result = await self.generator.generate(pack, deadline)
+        result = result.model_copy(update={'latency_ms': (asyncio.get_running_loop().time()-started)*1000})
+        generation_id = await asyncio.to_thread(self.generation_log.record, pack, result,
+            self.settings_service.snapshot() if self.settings_service else self.settings, sid, number)
+        if generation_id is None:
+            raise InferenceError('stale_after_inference')
+        return result.model_copy(update={'generation_id': generation_id})
 
     def _store_result(self, sid: str, number: int, revision: int, result: GenerationResult) -> bool:
         with connect(self.database) as db:
@@ -327,8 +355,8 @@ class DeliveryPipeline:
         with connect(self.database) as db:
             db.execute("BEGIN IMMEDIATE")
             for key in list(self.queue.keys):
-                if key.startswith('profile:'):
-                    _, chat, target = key.split(':')
+                if key.startswith(('profile:','hooks:')):
+                    _, chat, target, *_ = key.split(':')
                     member = db.execute('SELECT 1 FROM members m WHERE chat_id=? AND user_id=? '
                                         'AND consent=1 AND opt_out=0 AND NOT EXISTS '
                                         '(SELECT 1 FROM forgotten_members f WHERE f.chat_id=m.chat_id '
@@ -343,6 +371,15 @@ class DeliveryPipeline:
                 if not guard(db, turn, self.clock()):
                     cancel_turn(db, turn["session_id"], turn["turn_no"])
                     self.queue.cancel(f"session:{turn['session_id']}")
+
+    def rating_buttons(self, sid: str, number: int) -> list[list[InlineKeyboardButton]]:
+        with connect(self.database) as db:
+            generation = db.execute("SELECT id FROM generations WHERE session_id=? AND turn_no=? AND mode='roast'",
+                                    (sid, number)).fetchone()
+        if generation is None:
+            return []
+        return [[InlineKeyboardButton(text=label,callback_data=f'rate:{generation[0]}:{rating}')
+                 for label,rating in [('🔥',1),('😐',0),('💩',-1)]]]
 
     async def send_once(self) -> bool:
         """Claim synchronously immediately before HTTP; no yield between guard and send."""
@@ -384,7 +421,7 @@ class DeliveryPipeline:
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(text="Стоп", callback_data=callback_data("stop", sid)),
                         InlineKeyboardButton(text=f"Завершить · {number}/4", callback_data=callback_data("finish", sid)),
-                    ]]),
+                    ]] + self.rating_buttons(sid, number)),
                 )
                 message_id, status = sent.message_id, "sent"
         except TelegramRetryAfter as exc:
@@ -430,6 +467,23 @@ class DeliveryPipeline:
 
     async def handle_update(self, payload: dict[str, object], *, bot_id: int,
                             bot_username: str | None, owner_ids: frozenset[int]) -> None:
+        query = payload.get('callback_query')
+        if isinstance(query, dict) and isinstance(query.get('data'), str) and query['data'].startswith('rate:'):
+            try:
+                _, gid, rating = query['data'].split(':')
+                message, actor = query['message'], query['from']
+                if not isinstance(message, dict) or not isinstance(actor, dict) or actor.get('is_bot'):
+                    return
+                chat = message['chat']
+                if not isinstance(chat, dict):
+                    return
+                accepted = await asyncio.to_thread(self.generation_log.rate, int(gid), chat=int(chat['id']),
+                    thread=topic_id(message), user=int(actor['id']), message_id=int(message['message_id']), rating=int(rating))
+                await self.bot.answer_callback_query(callback_query_id=query['id'],
+                    text='Оценка сохранена.' if accepted else 'Эта оценка недоступна.')
+            except (KeyError, ValueError, TypeError):
+                return
+            return
         raw = payload.get("message")
         if isinstance(raw, dict):
             timestamp = raw.get("date")
@@ -482,7 +536,8 @@ class DeliveryPipeline:
                                       else "Сейчас занят. Попробуйте позже.")
                 return
         await handle_telegram_update(self.database, self.bot, payload, owner_ids=owner_ids,
-                                     bot_id=bot_id, bot_username=bot_username)
+                                     bot_id=bot_id, bot_username=bot_username,
+                                     settings=self.settings_service.snapshot() if self.settings_service else self.settings)
         await self.handle_message(payload, bot_username)
         self.invalidate()
 

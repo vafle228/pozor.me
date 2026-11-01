@@ -83,7 +83,7 @@ def test_independent_episodes(database, step, kind, count):
         add(database, number, seconds=number * step)
     build(database)
     (card,) = show(database, -1, 42)
-    assert (card["kind"], card["episodes"]) == (kind, count)
+    assert (card["source_kind"], card["episodes"]) == (kind, count)
     assert len(card["source_ids"]) == 3
 
 
@@ -100,7 +100,7 @@ def test_third_party_never_promoted_and_no_manual_cards(database):
     build(database)
     (card,) = show(database, -1, 42)
     assert card["attribution"] == "third_party"
-    assert card["kind"] == "third_party_joke"
+    assert card["source_kind"] == "third_party_joke"
     assert not commit_batch(database, -1, 42, 0, [{"id": 999, "text": "invented"}])
 
 
@@ -182,7 +182,7 @@ def test_forget_purges_shared_text_inbox_turns_fts_staging_and_keeps_other_group
             r[0]
             for r in db.execute("SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'аккорда'")
         ] == [3]
-        for table in ("turns", "turn_inputs", "outbox", "profile_cards"):
+        for table in ("turns", "turn_inputs", "outbox", "profile_items"):
             assert db.execute(f"SELECT * FROM {table}").fetchall() == []
         assert [r[0] for r in db.execute("SELECT update_id FROM inbox")] == [2]
         member = db.execute("SELECT * FROM members WHERE chat_id=-1 AND user_id=42").fetchone()
@@ -229,7 +229,7 @@ def test_import_ttl_from_apply_and_rollback_invalidates(database):
     now = datetime.now(UTC)
     apply_import(database, preview.manifest_path, now=now)
     build(database)
-    assert show(database, -1, 42)[0]["kind"] == "imported_quote"
+    assert show(database, -1, 42)[0]["source_kind"] == "imported_quote"
     cleanup(database, now=now + timedelta(days=89))
     assert show(database, -1, 42)
     cleanup(database, now=now + timedelta(days=91))
