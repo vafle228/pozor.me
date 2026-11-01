@@ -31,7 +31,14 @@ class Settings(BaseSettings):
     live_retention_days: int = Field(default=30, ge=1, le=3650)
     import_retention_days: int = Field(default=90, ge=1, le=3650)
     profile_cards_enabled: bool = False
+    telegram_api_id: int | None = Field(default=None, gt=0)
+    telegram_api_hash: SecretStr | None = Field(default=None, repr=False)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @field_validator("telegram_api_id", mode="before")
+    @classmethod
+    def empty_telegram_id(cls, value: object) -> object:
+        return None if value == "" else value
 
     @field_validator("retrieval_weights")
     @classmethod

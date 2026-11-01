@@ -7,10 +7,10 @@ function node(tag, text, cls) { const el = document.createElement(tag); if (text
 async function api(path, options) {
   const response = await fetch(path, {cache: "no-store", ...options});
   if (response.status === 401) { lock(); throw new Error("Войдите в пульт: сессия завершилась или пароль неверен."); }
-  if (!response.ok) throw new Error(response.status === 503 ? "База недоступна или её схема устарела. Проверьте путь и миграции бота." : "Не удалось загрузить данные. Попробуйте обновить страницу.");
+  if (!response.ok) { const detail = await response.json().catch(() => ({})); throw new Error(detail.error && !["database_unavailable", "not_found", "invalid_query"].includes(detail.error) ? detail.error : response.status === 503 ? "База недоступна или её схема устарела. Проверьте путь и миграции бота." : "Не удалось загрузить данные. Попробуйте обновить страницу."); }
   return response.json();
 }
-function lock() { state.request++; $("dashboard").hidden = true; $("login").hidden = false; $("profiles").replaceChildren(); $("chats").replaceChildren(); $("prompt").textContent = ""; }
+function lock() { state.request++; if (typeof resetTelegram === "function") resetTelegram(); $("dashboard").hidden = true; $("login").hidden = false; $("profiles").replaceChildren(); $("chats").replaceChildren(); $("prompt").textContent = ""; }
 function failure(error) { $("error").textContent = error.message; $("error").hidden = false; }
 function empty(title, description) { const el = node("div", undefined, "empty"); el.append(node("h2", title), node("div", description)); return el; }
 async function boot() {
@@ -24,7 +24,7 @@ async function boot() {
   const selected = $("chat").value;
   $("chat").replaceChildren(...state.chats.map(chat => { const option = node("option", `Чат ${chat.chat_id}${chat.allowed && chat.enabled ? " · сбор включён" : " · сбор выключен"}`); option.value = String(chat.chat_id); return option; }));
   if (state.chats.some(c => String(c.chat_id) === selected)) $("chat").value = selected;
-  $("profile-note").textContent = result.profiles_enabled ? "Сбор карточек включён в конфигурации. Видны участники с согласием; цитаты проверяются по сроку хранения и исходным сообщениям." : "Сбор карточек выключен в конфигурации (PROFILE_CARDS_ENABLED=false). Уже собранные актуальные карточки доступны ниже. Для новых включите сбор и перезапустите бот.";
+  $("profile-note").textContent = result.profiles_enabled ? "Автоматическая сборка цитат включена. Смысловой профиль можно составить в разделе «История Telegram». Показаны участники с согласием и актуальные источники." : "Автоматическая сборка цитат выключена. Смысловые профили можно составить в разделе «История Telegram» — включать фоновый сбор для этого не нужно.";
   renderChats(); await page(state.page);
 }
 function renderChats() {
@@ -50,10 +50,10 @@ async function profiles() {
     const info = node("div"); info.append(node("h3", name), node("div", `${member.current_username ? "@" + member.current_username + " · " : ""}ID ${member.user_id}`, "meta"));
     head.append(node("div", name.slice(0, 2).toUpperCase(), "avatar"), info); el.append(head);
     el.append(node("p", `Чат ${member.chat_id} · ${member.cards.length} карточек · был(а) ${dates(member.last_seen)}`));
-    if (!member.cards.length) el.append(node("p", "Портрет ещё не собран или источники уже недоступны. Нужны согласие, сообщения и включённый сбор карточек.", "note"));
+    if (!member.cards.length) el.append(node("p", "Портрет ещё не собран или источники уже недоступны. Составьте профиль в разделе «История Telegram».", "note"));
     for (const card of member.cards) {
       const item = node("div", undefined, "card");
-      item.append(node("span", names[card.kind] || card.kind, "tag"));
+      item.append(node("span", card.profile_version === 2 ? "Наблюдение · проверено оператором" : names[card.kind] || card.kind, "tag"));
       if (card.excluded) item.append(node("span", "Исключено из подбора", "tag off"));
       item.append(node("blockquote", card.summary));
       const details = node("details"); details.append(node("summary", `Источники: ${card.sources.length} · эпизодов: ${card.episodes}`));
@@ -67,12 +67,15 @@ async function profiles() {
   $("pagination").textContent = data.total ? `${state.offset + 1}–${Math.min(state.offset + 30, data.total)} из ${data.total}` : "";
 }
 async function page(name) {
+  if (typeof stopTelegram === "function") stopTelegram();
   state.page = name; state.request++; $("error").hidden = true;
   const titles = {profiles: ["ПОРТРЕТЫ", "АРХИВ НАБЛЮДЕНИЙ", "Люди в контексте.", "У каждого чата — свой портрет. У каждой цитаты — свой источник."], chats: ["ЧАТЫ", "ТЕРРИТОРИЯ БОТА", "Места встречи.", "Известные боту группы и настройки сбора данных."], prompt: ["ПРОМПТ", "РЕЖИССУРА ПРОЖАРКИ", "Слова перед словами.", "Инструкция, которая задаёт тон, формат и границы каждой шутки."]};
+  titles.history = ["ИСТОРИЯ", "ПОДКЛЮЧЕНИЕ TELEGRAM", "Прошлое в контексте.", "Выберите группу и участников — историю загрузим сами."];
   ["breadcrumb", "eyebrow", "title", "subtitle"].forEach((id, i) => $(id).textContent = titles[name][i]);
-  ["profiles", "chats", "prompt"].forEach(p => $(p + "-page").hidden = p !== name);
+  ["profiles", "chats", "prompt", "history"].forEach(p => $(p + "-page").hidden = p !== name);
   document.querySelectorAll("[data-page]").forEach(button => button.classList.toggle("active", button.dataset.page === name));
   if (name === "profiles") await profiles();
+  if (name === "history") await loadTelegram();
   if (name === "prompt") { const request = state.request; const prompt = await api("/api/prompt"); if (request !== state.request) return; $("prompt").textContent = prompt.system; $("prompt-hash").textContent = prompt.sha256; $("prompt-source").textContent = prompt.source; }
 }
 $("login-form").onsubmit = async event => { event.preventDefault(); $("login-error").textContent = ""; try { await api("/api/login", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({password: $("password").value})}); $("password").value = ""; await boot(); } catch (error) { $("login-error").textContent = error.message; } };

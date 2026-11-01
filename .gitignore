@@ -29,6 +29,8 @@ models/
 *.sqlite
 *.sqlite3
 *.db
+*.session
+*.session-journal
 *.gguf
 
 # Packaging and build output
