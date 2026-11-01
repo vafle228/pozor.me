@@ -1,6 +1,7 @@
 """Offline checks for local configuration and SQLite capabilities."""
 
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,9 +28,9 @@ def run_checks(settings: Settings) -> list[Check]:
     directory = Path(settings.database_path).expanduser().resolve().parent
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        probe = directory / ".pozor-write-check"
-        probe.write_bytes(b"")
-        probe.unlink()
+        with tempfile.TemporaryFile(dir=directory, prefix=".pozor-write-check-") as probe:
+            probe.write(b"probe")
+            probe.flush()
         checks.append(Check("data_directory", True, str(directory)))
     except OSError as exc:
         checks.append(Check("data_directory", False, f"{directory}: {exc.strerror or type(exc).__name__}"))

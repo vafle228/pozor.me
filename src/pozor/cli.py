@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import typer
+from aiogram.exceptions import TelegramAPIError
 from pydantic import ValidationError
 
 from pozor.config import Settings
@@ -30,6 +31,25 @@ profile_app = typer.Typer(help="Локальные карточки с исхо�
 app.add_typer(profile_app, name="profile")
 deployment_app = typer.Typer(help="Offline проверка закреплённых артефактов")
 app.add_typer(deployment_app, name="deployment")
+telegram_app = typer.Typer(help="Explicit live Telegram integration checks")
+app.add_typer(telegram_app, name="telegram")
+
+
+@telegram_app.command("smoke")
+def telegram_smoke(send: bool = typer.Option(False)) -> None:
+    """Authenticate and check groups; --send sends/deletes one synthetic message."""
+    from pozor.telegram_smoke import TelegramSmokeError, smoke
+
+    try:
+        settings = Settings()
+        configure_logging(settings)
+        result = asyncio.run(smoke(settings, send=send))
+    except Exception as exc:  # noqa: BLE001 -- never expose credential-bearing API errors
+        reason = str(exc) if isinstance(exc, TelegramSmokeError) else type(exc).__name__
+        typer.echo(f"FAIL Telegram smoke ({reason}): check configuration and group access",
+                   err=True)
+        raise typer.Exit(1) from None
+    typer.echo(json.dumps(result))
 
 
 @deployment_app.command("check")
@@ -114,7 +134,7 @@ def run_benchmark(
     report = asyncio.run(benchmark(suite, live=live, repeat=repeat))
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     typer.echo(f"OK report: {output}; human review pending")
-    if not report['retrieval_pass']:
+    if not report['retrieval_pass'] or report.get('model_pass') is False:
         raise typer.Exit(1)
 
 
@@ -217,6 +237,9 @@ def run() -> None:
         raise typer.Exit(code=1) from None
     except (OSError, MigrationError) as exc:
         typer.echo(f"FAIL startup: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    except TelegramAPIError:
+        typer.echo("FAIL Telegram API: check credentials, network and chat permissions", err=True)
         raise typer.Exit(code=1) from None
 
 

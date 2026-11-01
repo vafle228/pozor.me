@@ -1,4 +1,4 @@
-"""Read-only HTTP boundary and chat-scoped profile privacy regressions."""
+"""Authenticated HTTP boundary and chat-scoped profile privacy regressions."""
 
 import hashlib
 import threading
@@ -54,6 +54,19 @@ def login(client):
     assert response.status_code == 200
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=Strict" in response.headers["set-cookie"]
+
+
+def test_evidence_requires_auth_consent_scope_and_current_sources(client, database):
+    url = "/api/evidence?chat=-1&target=42"
+    assert client.get(url).status_code == 401
+    login(client)
+    assert [q["text"] for q in client.get(url).json()["quotes"]] == ["First chat quote"]
+    assert client.get("/api/evidence?chat=-1&target=43").status_code == 404
+    with connect(database) as db:
+        db.execute("UPDATE messages SET occurred_at='2000-01-01' WHERE scope_chat_id=-1")
+    assert client.get(url).json()["quotes"] == []
+    forget(database, -1, 42)
+    assert client.get(url).status_code == 404
 
 
 def test_http_auth_static_and_logout(client):
@@ -132,3 +145,97 @@ def test_read_only_database_and_missing_path(database, tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         AdminData(missing).read("/api/chats", {})
     assert not missing.exists()
+
+
+def test_member_roast_control_auth_scope_and_sessions(client, database):
+    url = "/api/members/roast"
+    payload = {"chat": -1, "user": 42, "enabled": False}
+    assert client.get("/api/members?chat=-1").status_code == 401
+    assert client.post(url, json=payload).status_code == 401
+    login(client)
+    members = client.get("/api/members?chat=-1").json()["members"]
+    assert {m["user_id"] for m in members} == {42, 43}
+    assert "First chat quote" not in str(members)
+    assert "Another context" not in str(members)
+    with connect(database) as db:
+        db.execute("""INSERT INTO sessions
+            (id,chat_id,target_id,initiator_id,state,created_at,trigger_message_id)
+            VALUES ('admin-session',-1,42,43,'active',100,20)""")
+    assert client.post(url, json=payload, headers={"Origin": "https://example.com"}).status_code == 403
+    assert client.post(url, json=payload).status_code == 200
+    assert client.get("/api/profiles?chat=-1").json()["total"] == 0
+    with connect(database) as db:
+        assert tuple(db.execute("SELECT consent,opt_out FROM members WHERE chat_id=-1 AND user_id=42").fetchone()) == (0, 1)
+        assert tuple(db.execute("SELECT state,closed_reason FROM sessions WHERE id='admin-session'").fetchone()) == ("closed", "opt_out")
+        assert db.execute("SELECT consent FROM members WHERE chat_id=-2 AND user_id=42").fetchone()[0] == 1
+        epoch = db.execute("SELECT epoch FROM data_epochs WHERE chat_id=-1 AND target_id=42").fetchone()[0]
+    assert client.post(url, json=payload).status_code == 200
+    with connect(database) as db:
+        assert db.execute("SELECT epoch FROM data_epochs WHERE chat_id=-1 AND target_id=42").fetchone()[0] == epoch
+    assert client.post(url, json={**payload, "enabled": True}).status_code == 200
+    assert client.post(url, json={**payload, "user": 43, "enabled": True}).status_code == 200
+    assert client.get("/api/profiles?chat=-1").json()["total"] == 2
+    forget(database, -1, 42)
+    assert client.post(url, json={**payload, "enabled": True}).status_code == 409
+    member = next(m for m in client.get("/api/members?chat=-1").json()["members"] if m["user_id"] == 42)
+    assert member["forgotten"] == 1 and member["consent"] == 0
+
+
+def test_member_roast_validation(client):
+    login(client)
+    payload = {"chat": -1, "user": 43, "enabled": True}
+    for changes in ({"enabled": "false"}, {"enabled": 1}, {"chat": True},
+                    {"user": None}, {"user": 2**100}, {"chat": "-1"}):
+        assert client.post("/api/members/roast", json={**payload, **changes}).status_code == 400
+    for changes in ({"chat": -999}, {"user": 999}, {"chat": -2}):
+        assert client.post("/api/members/roast", json={**payload, **changes}).status_code == 409
+    assert client.post("/api/members/roast", content="{}").status_code == 400
+    assert client.get("/api/members?chat=-999").status_code == 404
+    assert client.get("/api/members?chat=bad").status_code == 400
+
+
+def test_evidence_separates_own_messages_from_replies_mentions_and_unrelated(database):
+    from pozor.commands import set_consent
+    from pozor.context import retrieve
+    from pozor.semantic_profiles import snapshot
+
+    with connect(database) as db:
+        db.execute("UPDATE members SET consent=0 WHERE chat_id=-1 AND user_id=42")
+        for mid, relation in [(3, "reply"), (4, "mention"), (5, None)]:
+            text = f"Other person's message {mid}"
+            db.execute("""INSERT INTO messages(id,scope_chat_id,source_namespace,
+                source_message_id,author_id,text,text_hash,occurred_at,origin)
+                VALUES (?,-1,'live:-1',?,43,?,?,?,'live')""",
+                       (mid, mid, text, hashlib.sha256(text.encode()).hexdigest(),
+                        datetime.now(UTC).isoformat()))
+            db.execute("INSERT INTO message_subjects VALUES (?,43,'self','observed_self')", (mid,))
+            if relation:
+                db.execute("INSERT INTO message_subjects VALUES (?,42,?,'third_party')", (mid, relation))
+        # A reply that also mentions the member must appear once.
+        db.execute("INSERT INTO message_subjects VALUES (3,42,'mention','third_party')")
+    assert set_consent(database, -1, 42, True, respect_forgetting=True)
+    data = AdminData(database)
+    result = data.read("/api/evidence", {"chat": ["-1"], "target": ["42"]})
+    assert [r["id"] for r in result["quotes"]] == [1]
+    assert {r["id"] for r in result["related"]} == {3, 4}
+    assert all(r["author_id"] == 43 and r["attribution"] == "third_party" for r in result["related"])
+    _, portrait = snapshot(database, -1, 42)
+    assert [r["id"] for r in portrait] == [1]
+    pack = retrieve(database, chat_id=-1, thread_id=0, target_id=42,
+                    trigger_id=999, hint="message", target_label="Alice")
+    rows = [*pack.recent, *pack.evidence]
+    assert {r.source_message_id for r in rows} == {3, 4}
+    assert all(r.attribution == "third_party" for r in rows if r.author_id == 43)
+
+
+def test_evidence_context_does_not_consume_own_message_limit(database):
+    with connect(database) as db:
+        for mid in range(10, 115):
+            db.execute("""INSERT INTO messages(id,scope_chat_id,source_namespace,
+                source_message_id,author_id,text,text_hash,occurred_at,origin)
+                VALUES (?,-1,'live:-1',?,43,'reply','hash',?,'live')""",
+                       (mid, mid, datetime.now(UTC).isoformat()))
+            db.execute("INSERT INTO message_subjects VALUES (?,42,'reply','third_party')", (mid,))
+    result = AdminData(database).read("/api/evidence", {"chat": ["-1"], "target": ["42"]})
+    assert [r["id"] for r in result["quotes"]] == [1]
+    assert len(result["related"]) == 100

@@ -11,11 +11,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from telethon import errors
 
 from pozor import semantic_profiles
 from pozor.config import Settings
 from pozor.importing import apply_import, preview_import
+from pozor.llm import InferenceError
 from pozor.semantic_profiles import require_scope
 from pozor.storage import connect
 from pozor.telegram_account import AccountError, TelegramAccount, private_write
@@ -39,7 +42,7 @@ class AdminPipeline:
     def call(self, action: str, body: dict[str, Any] | None = None) -> Any:
         future = asyncio.run_coroutine_threadsafe(self.dispatch(action, body or {}), self.loop)
         try:
-            return future.result(timeout=25)
+            return future.result(timeout=10)
         except concurrent.futures.TimeoutError:
             future.cancel()
             raise AccountError("Telegram не ответил вовремя. Повторите попытку.") from None
@@ -54,6 +57,9 @@ class AdminPipeline:
                 raise AccountError(f"Telegram просит подождать {exc.seconds} секунд.") from None
             except (errors.RPCError, OSError):
                 raise AccountError("Не удалось связаться с Telegram. Повторите подключение.") from None
+            except TelegramAPIError:
+                raise AccountError("Не удалось добавить бота. Проверьте право приглашать участников "
+                                   "и доступ бота к группе.") from None
 
     def allowed(self) -> set[int]:
         with connect(self.database) as db:
@@ -82,7 +88,46 @@ class AdminPipeline:
             await self.account.disconnect()
             return {"state": "disconnected"}
         if action == "groups":
-            return {"groups": await self.account.groups(self.allowed())}
+            with connect(self.database) as db:
+                chats = {r["chat_id"]: bool(r["allowed"] and r["enabled"])
+                         for r in db.execute("SELECT chat_id,allowed,enabled FROM chats")}
+            groups = await self.account.groups(set(chats))
+            return {"groups": [group | {"enabled": chats[group["id"]]}
+                               for group in groups if group["id"] in chats]}
+        if action == "available_groups":
+            return {"groups": await self.account.groups()}
+        if action == "add_chat":
+            chat = body.get("chat")
+            if type(chat) is not int or chat >= 0:
+                raise AccountError("Выберите группу подключённого аккаунта.")
+            if self.task and not self.task.done():
+                raise AccountError("Сначала дождитесь или отмените загрузку истории.")
+            if self.settings.bot_token is None:
+                raise AccountError("Для добавления бота настройте BOT_TOKEN.")
+            groups = await self.account.groups()
+            group = next((group for group in groups if group["id"] == chat), None)
+            if group is None:
+                raise AccountError("Эта группа недоступна подключённому аккаунту.")
+            title = group["title"]
+            async with Bot(token=self.settings.bot_token.get_secret_value()) as bot:
+                identity = await bot.get_me()
+                try:
+                    member = await bot.get_chat_member(chat, identity.id)
+                except TelegramBadRequest:
+                    member = None
+                if member is None or member.status not in {"member", "administrator", "creator"}:
+                    if identity.username is None:
+                        raise AccountError("У Telegram-бота отсутствует username.")
+                    title = await self.account.add_bot(chat, identity.username)
+                    member = await bot.get_chat_member(chat, identity.id)
+                if member.status not in {"member", "administrator", "creator"}:
+                    raise AccountError("Telegram не подтвердил добавление бота в группу.")
+            with connect(self.database) as db:
+                db.execute("""INSERT INTO chats(chat_id,allowed,enabled,managed_by_admin,title,
+                    retention_days) VALUES (?,1,1,1,?,?) ON CONFLICT(chat_id) DO UPDATE SET
+                    allowed=1,enabled=1,managed_by_admin=1,title=excluded.title""",
+                           (chat, title, self.settings.live_retention_days))
+            return {"chat": chat, "title": title}
         if action == "members":
             return {"members": self.members(int(body["chat"]))}
         if action == "job":
@@ -186,9 +231,14 @@ class AdminPipeline:
         except AccountError as exc:
             self.drafts.clear()
             self.job.update(state="failed", message=str(exc) + " Уже импортированные цитаты сохранены.")
+        except InferenceError:
+            self.drafts.clear()
+            logger.warning("Profile job failed at analysis (InferenceError)")
+            self.job.update(state="failed", message="Цитаты сохранены, но модель не смогла составить профиль. "
+                            "Повторите составление профиля; повторный импорт не создаст дубликаты.")
         except Exception as exc:  # noqa: BLE001 - terminal job boundary; never expose exception text
             # Never strand a completed task in 'running', or log RPC/model payloads.
-            logger.warning("Profile job failed (%s)", type(exc).__name__)
+            logger.warning("Profile job failed at %s (%s)", self.job.get("stage"), type(exc).__name__)
             self.drafts.clear()
             self.job.update(state="failed", message="Задача не завершена. Проверьте доступ к группе, "
                             "согласие и работу модели. Уже импортированные цитаты сохранены.")

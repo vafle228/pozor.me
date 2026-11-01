@@ -241,7 +241,7 @@ def _validate_scope(database_path: Path, chat_id: int, target_id: int) -> bool:
             "SELECT allowed FROM chats WHERE chat_id=?", (chat_id,)
         ).fetchone()
         if chat is None or not chat["allowed"]:
-            raise ImportErrorSafe("destination chat is not in CHAT_ALLOWLIST")
+            raise ImportErrorSafe("destination chat is not permitted in the chat registry")
         member = connection.execute(
             "SELECT 1 FROM members WHERE chat_id=? AND user_id=?", (chat_id, target_id)
         ).fetchone()
@@ -449,7 +449,7 @@ def preview_import(
         allowed = connection.execute("SELECT allowed FROM chats WHERE chat_id=?", (chat_id,)).fetchone()
         if allowed is None or not allowed["allowed"]:
             manifest_path.unlink(missing_ok=True)
-            raise ImportErrorSafe("destination chat left CHAT_ALLOWLIST during preview")
+            raise ImportErrorSafe("destination chat permission was revoked during preview")
         if format == "telegram-desktop":
             connection.execute(
                 """INSERT INTO source_chats(namespace, export_chat_id, destination_chat_id, mapping_status)
@@ -553,7 +553,7 @@ def apply_import(database_path: Path, manifest_path: Path, *, now: datetime | No
             raise ImportErrorSafe("staged preview is expired or no longer applicable")
         scope = connection.execute("SELECT allowed FROM chats WHERE chat_id=?", (chat_id,)).fetchone()
         if scope is None or not scope["allowed"]:
-            raise ImportErrorSafe("destination chat is not in CHAT_ALLOWLIST")
+            raise ImportErrorSafe("destination chat is not permitted in the chat registry")
         if connection.execute(
             "SELECT 1 FROM members WHERE chat_id=? AND user_id=?", (chat_id, target_id)
         ).fetchone() is None:

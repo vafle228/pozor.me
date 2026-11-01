@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "status": "unverified_baseline",
-  "llama_cpp_build": null,
+  "status": "docker_live_smoke_verified_quality_pending",
+  "llama_cpp_build": "b11718-547208dca",
   "llama_cpp_artifact": {
-    "filename": null,
-    "sha256": null
+    "filename": "llama-server",
+    "sha256": "d76f2785045aaaccb9bbcf2de86f880cb3e8c16d7e11ceb7f12e042d3726633e"
   },
   "model": {
     "repo": "Qwen/Qwen3-8B-GGUF",
-    "revision": null,
-    "filename": null,
-    "sha256": null,
+    "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+    "filename": "Qwen3-8B-Q4_K_M.gguf",
+    "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
     "quantization": "Q4_K_M",
     "alias": "pozor-local"
   },
@@ -21,16 +21,23 @@
     "max_output_tokens": 180
   },
   "verification": {
-    "real_smoke": false,
-    "gpu": null,
-    "backend": null,
-    "latency": null
+    "real_smoke": true,
+    "gpu": "NVIDIA GeForce RTX 5060 Ti 16 GiB",
+    "backend": "CUDA (Docker Desktop Linux/WSL2)",
+    "latency": {
+      "p50": 612.5187999996342,
+      "p95": 794.8354999998628
+    }
   },
   "acceptance": {
     "t6_human_quality": "pending",
-    "gpu_offload_and_slot_release": "pending",
-    "latency_concurrency_vram": "pending",
-    "telegram_test_group": "not_run",
-    "windows_supervisor": "not_run"
+    "gpu_offload_and_slot_release": "CUDA device available; VRAM +~6 GiB; bounded cancellation release 610 ms",
+    "latency_concurrency_vram": "75 generations; concurrency 2/4 no fallback; total GPU memory 7241 MiB including desktop",
+    "telegram_test_group": "authentication/send/delete; enable_chat, roast_on, real model delivery, stop passed; expanded multi-user/topic scenarios pending",
+    "windows_supervisor": "Docker Compose running; Windows task samples not installed"
+  },
+  "docker": {
+    "runtime_image": "ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:b4e561932a1dd460ec2f9d2875ad0d9535cbfd3d2d6a48bdb3c9d50804088bff",
+    "host_port": 18080
   }
 }

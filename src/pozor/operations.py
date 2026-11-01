@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -110,7 +111,9 @@ def backup(database: Path, directory: Path, *, retention_days: int = 7) -> Path:
     _snapshot(database, destination, recover=False)
     cutoff = time.time() - retention_days * 86400
     for path in directory.glob('pozor-backup-????????T??????Z-????????????????????????????????.sqlite3'):
-        if (path not in (destination, database.resolve()) and not path.is_symlink()
+        if (re.fullmatch(r'pozor-backup-\d{8}T\d{6}Z-[0-9a-f]{32}\.sqlite3', path.name)
+                and path not in (destination, database.resolve())
+                and not path.is_symlink() and path.is_file()
                 and path.stat().st_mtime < cutoff):
             path.unlink()
     return destination

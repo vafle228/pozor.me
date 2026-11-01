@@ -161,7 +161,7 @@ def test_forget_purges_shared_text_inbox_turns_fts_staging_and_keeps_other_group
             "INSERT INTO turns(session_id,turn_no,revision,status,text) VALUES (?,1,0,'ready','private')",
             (sid,),
         )
-        db.execute("INSERT INTO turn_inputs VALUES (?,1,99,'private')", (sid,))
+        db.execute("INSERT INTO turn_inputs(session_id,turn_no,source_message_id,text) VALUES (?,1,99,'private')", (sid,))
         db.execute(
             "INSERT INTO outbox(session_id,turn_no,status,next_attempt_at) VALUES (?,1,'ready',0)",
             (sid,),

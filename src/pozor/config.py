@@ -17,7 +17,6 @@ class Settings(BaseSettings):
 
     bot_token: SecretStr | None = Field(default=None, repr=False)
     owner_ids: list[int] = Field(default_factory=list)
-    chat_allowlist: list[int] = Field(default_factory=list)
     database_path: Path = Path("./data/pozor.sqlite3")
     llm_base_url: str = "http://127.0.0.1:8080"
     llm_model: str = "pozor-local"
@@ -31,6 +30,7 @@ class Settings(BaseSettings):
     live_retention_days: int = Field(default=30, ge=1, le=3650)
     import_retention_days: int = Field(default=90, ge=1, le=3650)
     profile_cards_enabled: bool = False
+    semantic_profiles_enabled: bool = True
     telegram_api_id: int | None = Field(default=None, gt=0)
     telegram_api_hash: SecretStr | None = Field(default=None, repr=False)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
             raise ValueError("retrieval weights must be finite and nonnegative")
         return value
 
-    @field_validator("owner_ids", "chat_allowlist")
+    @field_validator("owner_ids")
     @classmethod
     def ids_must_be_unique(cls, value: list[int]) -> list[int]:
         if len(value) != len(set(value)):

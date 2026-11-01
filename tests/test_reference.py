@@ -2,9 +2,19 @@ import unittest
 from dataclasses import replace
 
 from reference.core import (
-    Alias, Evidence, Incoming, Session, close_reason, decide,
-    flatten_text, may_publish, pack_evidence, reciprocal_rank_fusion,
-    select_export, user_id, utf16_slice,
+    Alias,
+    Evidence,
+    Incoming,
+    Session,
+    close_reason,
+    decide,
+    flatten_text,
+    may_publish,
+    pack_evidence,
+    reciprocal_rank_fusion,
+    select_export,
+    user_id,
+    utf16_slice,
 )
 
 
@@ -114,8 +124,8 @@ class SessionTests(unittest.TestCase):
         self.session = Session("s", 1, 0, 17, 18, 3, 4, 1000, 1010, 1)
 
     def publish(self, session=None, **overrides):
-        args = dict(job_session_id="s", job_revision=3, job_epoch=4,
-                    job_turn=2, deadline=1060, now=1030)
+        args = {"job_session_id": "s", "job_revision": 3, "job_epoch": 4,
+                "job_turn": 2, "deadline": 1060, "now": 1030}
         args.update(overrides)
         return may_publish(session or self.session, **args)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
@@ -20,17 +21,22 @@ from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, Telegra
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 
 from pozor.commands import (
+    CommandContext,
     callback_data,
     close_session,
     close_sessions_on_startup,
+    expire_sessions,
     handle_telegram_update,
     parse_command,
+    resolve_target,
+    roast_hint,
 )
 from pozor.config import Settings
-from pozor.context import ContextPack, retrieve, sources_current
+from pozor.context import ContextPack, ConversationTurn, retrieve, sources_current
 from pozor.inference_queue import InferenceQueue, QueueBusy
 from pozor.llm import GenerationResult, InferenceError
 from pozor.storage import connect
+from pozor.telegram_scope import topic_id
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +117,8 @@ class DeliveryPipeline:
         except (TelegramAPIError, OSError, TimeoutError):
             logger.warning("delivery_notice_failed chat_id=%s", chat_id)
 
-    def accept(self, session_id: str, message_id: int, text: str, *, first: bool = False) -> bool:
+    def accept(self, session_id: str, message_id: int, text: str, *, first: bool = False,
+               author_id: int | None = None) -> bool:
         """Persist/coalesce one turn; never wait for the GPU in the update handler."""
         if self.stopping or not self.ready:
             return False
@@ -149,7 +156,8 @@ class DeliveryPipeline:
             else:
                 db.execute("INSERT INTO turns(session_id,turn_no,revision,status) VALUES (?,?,?,'pending')",
                            (session_id, number, revision))
-            db.execute("INSERT INTO turn_inputs VALUES (?,?,?,?)", (session_id, number, message_id, text))
+            db.execute("INSERT INTO turn_inputs(session_id,turn_no,source_message_id,text,author_id) "
+                       "VALUES (?,?,?,?,?)", (session_id, number, message_id, text, author_id))
         loop = asyncio.get_running_loop()
         began = self.due.get(session_id, (loop.time(), 0))[0]
         due = loop.time() if first else min(loop.time() + 1.2, began + 3)
@@ -165,7 +173,14 @@ class DeliveryPipeline:
         return True
 
     async def _drive(self, session_id: str) -> None:
+        typing: asyncio.Task[None] | None = None
         try:
+            if hasattr(self.bot, 'send_chat_action'):
+                with connect(self.database) as db:
+                    scope = db.execute('SELECT chat_id,thread_id FROM sessions WHERE id=?',
+                                       (session_id,)).fetchone()
+                if scope:
+                    typing = asyncio.create_task(self._typing(scope['chat_id'], scope['thread_id']))
             while not self.stopping:
                 delay = self.due[session_id][1] - asyncio.get_running_loop().time()
                 if delay > 0:
@@ -181,6 +196,18 @@ class DeliveryPipeline:
                                         "ORDER BY source_message_id", (session_id, turn["turn_no"])).fetchall()
                     memory = [r[0] for r in db.execute("SELECT text FROM turns WHERE session_id=? "
                                                      "AND status='sent' ORDER BY turn_no", (session_id,))]
+                    member = db.execute("SELECT display_name FROM members WHERE chat_id=? AND user_id=?",
+                                        (s['chat_id'], s['target_id'])).fetchone()
+                    conversation = []
+                    for previous in db.execute("SELECT turn_no,text,fallback FROM turns WHERE session_id=? "
+                                               "AND status='sent' ORDER BY turn_no", (session_id,)):
+                        for entry in db.execute("SELECT text,author_id FROM turn_inputs WHERE session_id=? "
+                                                "AND turn_no=? ORDER BY source_message_id",
+                                                (session_id, previous['turn_no'])):
+                            conversation.append(ConversationTurn(role='user', author_id=entry['author_id'],
+                                                                 text=entry['text']))
+                        if not previous['fallback']:
+                            conversation.append(ConversationTurn(role='assistant', text=previous['text']))
                 # Absolute deadline includes retrieval, queue, tokenization and validation.
                 deadline = asyncio.get_running_loop().time() + self.settings.generation_deadline_seconds
                 wall_deadline = self.clock() + self.settings.generation_deadline_seconds
@@ -194,11 +221,15 @@ class DeliveryPipeline:
                         pack = await asyncio.to_thread(
                             retrieve, self.database, chat_id=s["chat_id"], thread_id=s["thread_id"],
                             target_id=s["target_id"], trigger_id=inputs[-1]["source_message_id"],
-                            hint="\n".join(r["text"] for r in inputs), target_label=f"user_id={s['target_id']}",
+                            hint="\n".join(r["text"] for r in inputs),
+                            target_label=member['display_name'] if member and member['display_name'] else 'Участник',
                             weights=self.settings.retrieval_weights,
                             cards_enabled=self.settings.profile_cards_enabled,
                         )
-                        pack = pack.model_copy(update={"session_turns": memory})
+                        pack = pack.model_copy(update={"session_turns": memory, "mode": s["mode"],
+                            "conversation": conversation, "initiator_id": s['initiator_id'],
+                            "speaker_id": inputs[-1]['author_id'],
+                            "trigger": pack.trigger.model_copy(update={'author_id': inputs[-1]['author_id']})})
                         with connect(self.database) as db:
                             db.execute("BEGIN IMMEDIATE")
                             db.execute("UPDATE turns SET evidence_epoch=?,deadline=?,status='queued' "
@@ -218,21 +249,43 @@ class DeliveryPipeline:
                     if self.stopping or asyncio.current_task().cancelling():  # type: ignore[union-attr]
                         raise
                 except (TimeoutError, InferenceError, QueueBusy) as exc:
+                    reason = 'deadline' if isinstance(exc, TimeoutError) else str(exc)
+                    logger.warning('generation_failed reason=%s', reason)
                     if isinstance(exc, QueueBusy):
                         await self.notify(s["chat_id"], s["thread_id"], "Сейчас занят. Попробуйте позже.")
                     with connect(self.database) as db:
-                        db.execute("UPDATE turns SET status='failed' WHERE session_id=? AND turn_no=? "
-                                   "AND revision=? AND status IN ('pending','queued','generating')", (session_id, number, revision))
+                        db.execute("UPDATE turns SET status='failed',generation_reason=? WHERE session_id=? AND turn_no=? "
+                                   "AND revision=? AND status IN ('pending','queued','generating')", (reason, session_id, number, revision))
+                    if not isinstance(exc, QueueBusy):
+                        await self.notify(s['chat_id'], s['thread_id'],
+                                          'Ответ не успел подготовиться. Раунд сохранён; можно продолжить тегом или ответом.')
                 with connect(self.database) as db:
                     pending = db.execute("SELECT 1 FROM turns WHERE session_id=? AND status='pending'",
                                          (session_id,)).fetchone()
                 if not pending:
                     return
-        except Exception:  # noqa: BLE001 -- supervise without logging private input/exception bodies
-            logger.error("generation_job_failed session_id=%s", session_id)
+        except Exception as exc:  # noqa: BLE001 -- persist safe diagnostics, never exception bodies
+            logger.error("generation_job_failed session_id=%s type=%s", session_id, type(exc).__name__)
+            with connect(self.database) as db:
+                db.execute("UPDATE turns SET status='failed',generation_reason=? WHERE session_id=? "
+                           "AND status IN ('pending','queued','generating')",
+                           ('job_error:' + type(exc).__name__, session_id))
         finally:
+            if typing:
+                typing.cancel()
+                await asyncio.gather(typing, return_exceptions=True)
             self.due.pop(session_id, None)
             self.rebuilds.pop(session_id, None)
+
+    async def _typing(self, chat_id: int, thread_id: int) -> None:
+        while True:
+            try:
+                async with asyncio.timeout(2):
+                    await self.bot.send_chat_action(chat_id=chat_id, message_thread_id=thread_id or None,
+                                                    action='typing')
+            except (TelegramAPIError, OSError, TimeoutError):
+                pass
+            await asyncio.sleep(4)
 
     async def _generate(self, pack: ContextPack, sid: str, number: int,
                         revision: int, deadline: float) -> GenerationResult:
@@ -242,7 +295,8 @@ class DeliveryPipeline:
             if (turn is None or turn["revision"] != revision or turn["status"] != "queued"
                     or not guard(db, turn, self.clock())
                     or not sources_current(db, pack.chat_id, pack.target_id,
-                                           [e.evidence_id for e in [*pack.recent, *pack.evidence]], self.clock())):
+                                           [e.evidence_id for e in [*pack.recent, *pack.evidence]] +
+                                           [eid for memory in pack.dossier for eid in memory.evidence_ids], self.clock())):
                 raise InferenceError("stale_before_inference")
             db.execute("UPDATE turns SET status='generating' WHERE session_id=? AND turn_no=?", (sid, number))
         return await self.generator.generate(pack, deadline)
@@ -258,9 +312,11 @@ class DeliveryPipeline:
             if not sources_current(db, session['chat_id'], session['target_id'],
                                    result.roast.evidence_ids, self.clock()):
                 return False
-            db.execute("UPDATE turns SET status='ready',text=?,evidence_ids=?,context_hash=?,token_count=? "
+            db.execute("UPDATE turns SET status='ready',text=?,evidence_ids=?,context_hash=?,token_count=?,"
+                       "generation_reason=?,fallback=?,deadline=? "
                        "WHERE session_id=? AND turn_no=?", (result.roast.text, json.dumps(result.roast.evidence_ids),
-                       result.context_hash, result.token_count, sid, number))
+                       result.context_hash, result.token_count, result.reason, int(result.fallback),
+                       self.clock() + 5, sid, number))
             db.execute("INSERT INTO outbox(session_id,turn_no,status,next_attempt_at) VALUES (?,?,'ready',?) "
                        "ON CONFLICT(session_id,turn_no) DO UPDATE SET status='ready',"
                        "next_attempt_at=excluded.next_attempt_at,error_code=NULL", (sid, number, self.clock()))
@@ -323,11 +379,11 @@ class DeliveryPipeline:
             async with asyncio.timeout(min(5, max(.001, row["deadline"] - now))):
                 sent = await self.bot.send_message(
                     chat_id=chat_id, message_thread_id=row["thread_id"] or None,
-                    reply_parameters=ReplyParameters(message_id=trigger, allow_sending_without_reply=True),
+                    reply_parameters=ReplyParameters(message_id=trigger, allow_sending_without_reply=False),
                     text=row["text"], parse_mode=None,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(text="Стоп", callback_data=callback_data("stop", sid)),
-                        InlineKeyboardButton(text="Завершить", callback_data=callback_data("finish", sid)),
+                        InlineKeyboardButton(text=f"Завершить · {number}/4", callback_data=callback_data("finish", sid)),
                     ]]),
                 )
                 message_id, status = sent.message_id, "sent"
@@ -385,6 +441,34 @@ class DeliveryPipeline:
             entities_raw = raw.get("entities")
             entities = tuple(e for e in entities_raw if isinstance(e, dict)) if isinstance(entities_raw, list) else ()
             parsed = parse_command(text, entities, bot_username=bot_username) if isinstance(text, str) else None
+            expire_sessions(self.database, now=int(self.clock()))
+            # Repeating the same target is still the same round. Only an explicit
+            # different target or /roast starts another round.
+            reply = raw.get("reply_to_message")
+            reply_actor = reply.get("from") if isinstance(reply, dict) else None
+            targets_human = isinstance(reply_actor, dict) and reply_actor.get("id") != bot_id
+            if (parsed and parsed.name == "roast" and isinstance(text, str) and text.startswith("@")
+                    and not re.match(r"^(?:меня|себя|me)(?=\s|$)", parsed.argument, re.IGNORECASE)):
+                chat, actor = raw.get("chat"), raw.get("from")
+                if isinstance(chat, dict) and isinstance(actor, dict):
+                    with connect(self.database) as db:
+                        continuing = db.execute("""SELECT * FROM sessions WHERE chat_id=?
+                            AND thread_id=? AND (target_id=? OR initiator_id=?) AND state='active'
+                            """,
+                            (chat.get("id"), topic_id(raw),
+                             actor.get("id"), actor.get("id"))).fetchone()
+                    explicit_target = None
+                    if parsed.target_count or targets_human:
+                        explicit_target = resolve_target(self.database, CommandContext(
+                            int(chat['id']), actor.get('id'), int(raw['message_id']),
+                            topic_id(raw), text, entities,
+                            reply_actor['id'] if isinstance(reply_actor, dict) and targets_human else None,
+                        ), parsed, bot_user_ids=frozenset({bot_id}))
+                    if continuing and ((not parsed.target_count and not targets_human)
+                                       or explicit_target == continuing['target_id']):
+                        await self.handle_message(payload, bot_username)
+                        self.invalidate()
+                        return
             busy = self.queue.closed or sum(len(q) for q in self.queue.chats.values()) >= self.queue.capacity
             if parsed and parsed.name == "roast" and (not self.ready or busy):
                 chat = raw.get("chat")
@@ -393,7 +477,7 @@ class DeliveryPipeline:
                         and chat.get("type") in {"group", "supergroup"}
                         and isinstance(actor, dict) and type(actor.get("id")) is int
                         and not actor.get("is_bot") and not raw.get("sender_chat")):
-                    await self.notify(chat["id"], int(raw.get("message_thread_id") or 0),
+                    await self.notify(chat["id"], topic_id(raw),
                                       "Генерация пока недоступна. Попробуйте позже." if not self.ready
                                       else "Сейчас занят. Попробуйте позже.")
                 return
@@ -403,7 +487,7 @@ class DeliveryPipeline:
         self.invalidate()
 
     async def handle_message(self, payload: dict[str, object], bot_username: str | None) -> None:
-        """Continue only target replies to delivered session punches or bot mentions."""
+        """Continue participant replies to delivered punches or bot mentions."""
         edit = payload.get("edited_message")
         raw = payload.get("message")
         if isinstance(edit, dict):
@@ -426,14 +510,39 @@ class DeliveryPipeline:
         timestamp = raw.get("date")
         if not isinstance(timestamp, (int, float)) or abs(self.clock() - timestamp) > 30:
             return
-        thread = raw.get("message_thread_id", 0)
+        thread = topic_id(raw)
+        from pozor.privacy import blocked
+
         with connect(self.database) as db:
+            if blocked(db, chat["id"], actor["id"]):
+                return
             s = db.execute("SELECT * FROM sessions WHERE chat_id=? AND thread_id=? AND state='active'",
                            (chat.get("id"), thread)).fetchone()
             if s is None:
+                reply = raw.get('reply_to_message')
+                reply_id = reply.get('message_id') if isinstance(reply, dict) else None
+                old = db.execute('''SELECT s.* FROM outbox o JOIN sessions s ON s.id=o.session_id
+                    WHERE s.chat_id=? AND s.thread_id=? AND o.telegram_message_id=?
+                    AND o.status='sent' AND s.state='closed' AND (s.target_id=? OR s.initiator_id=?)''',
+                    (chat['id'], thread, reply_id, actor['id'], actor['id'])).fetchone()
+                if old:
+                    await self.notify(chat['id'], thread,
+                        'Этот раунд завершён. Начни новый: /roast @username или /roast ответом на сообщение участника.')
                 return
+            label_row = db.execute('SELECT display_name FROM members WHERE chat_id=? AND user_id=?',
+                                   (s['chat_id'], s['target_id'])).fetchone()
+            target_label = label_row['display_name'] if label_row and label_row['display_name'] else 'Участник'
             if s["trigger_message_id"] == mid:
-                self.accept(s["id"], mid, text, first=True)
+                entities_raw = raw.get("entities", [])
+                entities = tuple(e for e in entities_raw if isinstance(e, dict)) if isinstance(entities_raw, list) else ()
+                command = parse_command(text, entities, bot_username=bot_username)
+                hint = roast_hint(command, target_label) if command else text
+                from pozor.ingestion import capture_reply_context
+
+                selected_quote = capture_reply_context(self.database, raw, s['target_id'])
+                if selected_quote:
+                    hint = (hint + "\nРеплика участника: " + selected_quote).strip()
+                self.accept(s["id"], mid, hint.strip() or ("Привет!" if s["mode"] == "dialogue" else "Дружеская прожарка участника."), first=True, author_id=actor['id'])
                 return
             reply = raw.get("reply_to_message")
             reply_id = reply.get("message_id") if isinstance(reply, dict) else None
@@ -459,8 +568,18 @@ class DeliveryPipeline:
             close_session(self.database, session_id=s["id"], chat_id=s["chat_id"], thread_id=s["thread_id"],
                           actor_id=actor["id"])
             self.invalidate()
-        elif actor["id"] == s["target_id"] and not text.startswith("/") and s["last_sent_at"] is not None:
-            self.accept(s["id"], mid, text)
+        elif (actor["id"] in (s["target_id"], s["initiator_id"])
+              and not text.startswith("/")):
+            entities_raw = raw.get("entities", [])
+            entities = tuple(e for e in entities_raw if isinstance(e, dict)) if isinstance(entities_raw, list) else ()
+            command = parse_command(text, entities, bot_username=bot_username)
+            hint = roast_hint(command, target_label) if command else text
+            from pozor.ingestion import capture_reply_context
+
+            quote = capture_reply_context(self.database, raw, s['target_id'])
+            if quote:
+                hint = (hint + '\nРеплика участника: ' + quote).strip()
+            self.accept(s["id"], mid, hint.strip() or 'Продолжи по той же теме.', author_id=actor['id'])
 
     async def aclose(self) -> None:
         self.stopping = True

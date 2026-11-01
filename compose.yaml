@@ -1,0 +1,39 @@
+name: pozor
+services:
+  llm:
+    build:
+      context: .
+      dockerfile: ops/docker/llm.Dockerfile
+    restart: unless-stopped
+    gpus: all
+    command: ["--model", "/models/model.gguf", "--alias", "pozor-local", "--host", "0.0.0.0", "--port", "8080", "--ctx-size", "8192", "--parallel", "1", "--n-gpu-layers", "99", "--slots", "--jinja", "--reasoning", "off"]
+    ports:
+      - "127.0.0.1:18080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  bot:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/pozor.sqlite3
+      LLM_BASE_URL: http://llm:8080
+      LLM_MODEL: pozor-local
+      CONTEXT_SIZE: "8192"
+      LOG_LEVEL: INFO
+    volumes:
+      - ./data:/data
+    depends_on:
+      llm:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

@@ -8,6 +8,7 @@ import httpx
 import pytest
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.methods import SendMessage
+from aiogram.types import Update
 
 from pozor.commands import close_session, set_consent, start_session
 from pozor.config import Settings
@@ -53,7 +54,11 @@ class FakeGenerator:
         self.entered.set()
         await self.release.wait()
         ids = [pack.evidence[0].evidence_id] if pack.evidence else [pack.trigger.evidence_id]
-        raw = json.dumps({"text": f"План победы номер {len(self.packs)} всё ещё загружается.",
+        fresh = ["План победы всё ещё на экране загрузки.",
+                 "Турнир закончился раньше, чем загрузилась легенда.",
+                 "Опоздание стало единственным стабильным рекордом.",
+                 "Дедлайн ждал соперника, но увидел только будильник."]
+        raw = json.dumps({"text": fresh[(len(self.packs) - 1) % len(fresh)],
                           "evidence_ids": ids, "angle": "synthetic"})
         return GenerationResult(roast=validate_output(raw, pack), fallback=False, context_hash="test")
 
@@ -86,6 +91,36 @@ def start(scope):
 
 async def generated(p):
     await asyncio.gather(*list(p.jobs.values()))
+
+
+async def test_real_aiogram_update_reaches_command_pipeline(scope):
+    pipeline, database, clock, bot, _ = scope
+    with connect(database) as db:
+        db.execute('UPDATE chats SET enabled=0')
+    update = Update.model_validate({
+        'update_id': 900, 'message': {
+            'message_id': 900, 'date': int(clock()),
+            'chat': {'id': -1001, 'type': 'supergroup', 'title': 'Synthetic'},
+            'from': {'id': 42, 'is_bot': False, 'first_name': 'Synthetic'},
+            'text': '/enable_chat',
+            'entities': [{'type': 'bot_command', 'offset': 0, 'length': 12}],
+        },
+    })
+
+    class Source:
+        async def get_updates(self, **kwargs):
+            return [update]
+
+    async def handler(payload):
+        await pipeline.handle_update(payload, bot_id=99, bot_username='synthetic_bot',
+                                     owner_ids=frozenset({42}))
+
+    await poll_once(Source(), database, 99, control_handler=handler)
+    assert bot.calls[-1]['text'] == 'Чат включён.'
+    with connect(database) as db:
+        assert db.execute('SELECT enabled FROM chats').fetchone()[0] == 1
+        assert db.execute('SELECT count(*) FROM command_receipts').fetchone()[0] == 1
+    await pipeline.aclose()
 
 
 def state(database, table="outbox"):
@@ -244,7 +279,7 @@ async def test_forbidden_disables_chat(scope):
 
 def incoming(clock, mid=2, *, actor=42, reply=701, thread=0, chat=-1001, text="игра ответ", **extra):
     return {"message": {"message_id": mid, "date": int(clock()), "text": text,
-                        "chat": {"id": chat, "type": "supergroup"}, "message_thread_id": thread,
+                        "chat": {"id": chat, "type": "supergroup"}, "message_thread_id": thread, "is_topic_message": bool(thread),
                         "from": {"id": actor, "first_name": "Synthetic"},
                         "reply_to_message": {"message_id": reply}, **extra}}
 
@@ -430,6 +465,71 @@ async def test_polling_commands_import_and_stop_while_gpu_busy(scope, tmp_path, 
     await p.aclose()
 
 
+@pytest.mark.parametrize('argument,expected', [('', 'Дружеская прожарка участника.'),
+                                               ('игра', 'игра'), ('@known_user игра', 'Участник игра')])
+async def test_roast_routing_suffix_is_not_model_evidence(scope, monkeypatch, argument, expected):
+    from pozor import commands
+
+    pipeline, database, clock, _bot, generator = scope
+    monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
+    payload = incoming(clock, mid=1, actor=43, text='/roast@pozor_me_bot ' + argument)
+    payload['message']['reply_to_message'] = {
+        'message_id': 50, 'date': int(clock()), 'chat': {'id': -1001, 'type': 'supergroup'},
+        'from': {'id': 42}, 'text': 'Обещал выиграть турнир, но проспал начало.'}
+    if argument.startswith('@'):
+        with connect(database) as db:
+            db.execute("INSERT INTO aliases(chat_id,user_id,username,valid_from,source) "
+                       "VALUES (-1001,42,'known_user','2020-01-01','live')")
+        payload['message']['entities'] = [
+            {'type': 'mention', 'offset': len('/roast@pozor_me_bot '), 'length': 11}]
+    await pipeline.handle_update(payload, bot_id=99, bot_username='pozor_me_bot',
+                                 owner_ids=frozenset())
+    await generated(pipeline)
+    quote = 'Реплика участника: Обещал выиграть турнир, но проспал начало.'
+    assert generator.packs[0].trigger.text == ((argument and expected + '\n') or '') + quote
+    assert '@pozor_me_bot' not in generator.packs[0].trigger.text
+    await pipeline.aclose()
+
+
+async def test_empty_roast_refuses_session_without_charging_cooldown(scope, monkeypatch):
+    from pozor import commands
+
+    pipeline, database, clock, bot, generator = scope
+    monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
+    payload = incoming(clock, mid=1, actor=43, text='/roast')
+    payload['message']['reply_to_message']['from'] = {'id': 42}
+    await pipeline.handle_update(payload, bot_id=99, bot_username='pozor_me_bot',
+                                 owner_ids=frozenset())
+    assert 'Пока нет материала' in bot.calls[-1]['text']
+    assert state(database, 'sessions') == []
+    assert state(database, 'command_cooldowns') == []
+    assert not generator.packs
+    await pipeline.aclose()
+
+
+@pytest.mark.parametrize("command", ["/roast", "@pozor_me_bot", "@pozor_me_bot попусти"])
+async def test_reply_text_reaches_real_context_before_generation(scope, monkeypatch, command):
+    from pozor import commands
+
+    pipeline, _database, clock, _, generator = scope
+    monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
+    quote = 'Обещал выиграть турнир, но проспал начало.'
+    payload = incoming(clock, mid=1, actor=43, text=command)
+    if command.startswith("@"):
+        payload["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 13}]
+    payload['message']['reply_to_message'] = {
+        'message_id': 50, 'date': int(clock()), 'chat': {'id': -1001, 'type': 'supergroup'},
+        'from': {'id': 42}, 'text': quote}
+    await pipeline.handle_update(payload, bot_id=99, bot_username='pozor_me_bot',
+                                 owner_ids=frozenset())
+    await generated(pipeline)
+    pack = generator.packs[0]
+    evidence = [e for e in [*pack.recent, *pack.evidence] if e.text == quote]
+    assert len(evidence) == 1
+    assert evidence[0].author_id == 42 and evidence[0].attribution == 'observed_self'
+    await pipeline.aclose()
+
+
 @pytest.mark.asyncio
 async def test_real_ingestion_edit_invalidates_ready_result(scope):
     p, db, clock, bot, _ = scope
@@ -477,6 +577,68 @@ async def test_fast_reply_defers_and_mentions_stop(scope):
     # Bot username is 12 characters plus @ (UTF-16 length 13).
     assert state(db, "sessions")[0]["state"] == "closed"
     assert len(bot.calls) == 1
+    await p.aclose()
+
+
+@pytest.mark.parametrize("actor", [42, 43])
+async def test_participant_bot_mention_continues_then_stops_without_new_session(scope, actor):
+    p, db, clock, bot, _ = scope
+    start(scope)
+    await generated(p)
+    await p.send_once()
+    clock.now += 10
+    payload = incoming(clock, mid=2, actor=actor, reply=999, text="@pozor_me_bot вот ответ",
+                       entities=[{"type": "mention", "offset": 0, "length": 13}])
+    await p.handle_update(payload, bot_id=99, bot_username="pozor_me_bot", owner_ids=frozenset())
+    await generated(p)
+    assert len(state(db, "sessions")) == 1
+    assert len(bot.calls) == 1  # no command error or second session acknowledgement
+    assert len(state(db, "turns")) == 2
+    payload = incoming(clock, mid=3, reply=999, text="@pozor_me_bot хватит",
+                       entities=[{"type": "mention", "offset": 0, "length": 13}])
+    await p.handle_update(payload, bot_id=99, bot_username="pozor_me_bot", owner_ids=frozenset())
+    assert state(db, "sessions")[0]["state"] == "closed"
+    assert len(bot.calls) == 1
+    await p.aclose()
+
+
+async def test_initiator_reply_continues_with_memory(scope):
+    p, db, clock, bot, generator = scope
+    sid = start(scope)
+    await generated(p)
+    await p.send_once()
+    clock.now += 11
+    await p.handle_update(incoming(clock, actor=43, text="а про турнир расскажи"),
+                          bot_id=99, bot_username="pozor_me_bot", owner_ids=frozenset())
+    p.due[sid] = (0, 0)
+    await generated(p)
+    assert len(generator.packs[-1].session_turns) == 1
+    assert "про турнир" in generator.packs[-1].trigger.text
+    assert await p.send_once()
+    assert len(bot.calls) == 2
+    assert len(state(db, "sessions")) == 1
+    await p.aclose()
+
+
+async def test_explicit_mention_target_replaces_session_and_cancels_old_answer(scope, monkeypatch):
+    from pozor import commands
+
+    p, db, clock, bot, _ = scope
+    monkeypatch.setattr(commands, "utc_now", lambda: int(clock()))
+    sid = start(scope)
+    await generated(p)  # Old punch is ready but has not been sent.
+    clock.now += 11
+    payload = incoming(clock, actor=43, text="@pozor_me_bot прожарь турнир")
+    payload["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 13}]
+    payload["message"]["reply_to_message"] = {
+        "message_id": 50, "from": {"id": 43}, "text": "Опять проспал турнир."}
+    await p.handle_update(payload, bot_id=99, bot_username="pozor_me_bot", owner_ids=frozenset())
+    await generated(p)
+    assert state(db, "sessions")[0]["closed_reason"] == "replaced"
+    assert len(state(db, "sessions")) == 2
+    assert await p.send_once()
+    assert all(row["status"] == "cancelled" for row in state(db) if row["session_id"] == sid)
+    assert len(bot.calls) == 2  # New command acknowledgement and new punch only.
     await p.aclose()
 
 
@@ -609,7 +771,9 @@ async def test_retrieval_timeout_is_terminal(scope, monkeypatch):
         assert state(db, "turns")[0]["deadline"] is not None
         assert generator.packs == []
         assert not await p.send_once()
-        assert bot.calls == []
+        assert len(bot.calls) == 1
+        assert 'Раунд сохранён' in bot.calls[0]['text']
+        assert state(db, 'turns')[0]['generation_reason'] == 'deadline'
     finally:
         await p.aclose()
 
@@ -712,4 +876,175 @@ async def test_forget_during_inference_purges_and_cancels_without_resurrection(s
     assert state(db, 'turns') == state(db, 'turn_inputs') == state(db, 'outbox') == []
     assert not await p.send_once()
     assert len(bot.calls) == 1 and 'удалены' in bot.calls[0]['text']
+    await p.aclose()
+
+
+@pytest.mark.parametrize("text,mode", [
+    ("@pozor_me_bot как дела?", "dialogue"),
+    ("@pozor_me_bot", "dialogue"),
+    ("@pozor_me_bot прожарь меня за опоздание", "roast"),
+    ("/roast меня за опоздание", "roast"),
+])
+async def test_self_roast_and_targetless_dialogue(scope, monkeypatch, text, mode):
+    from pozor import commands
+    from pozor.llm import messages_for
+
+    p, database, clock, bot, generator = scope
+    monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
+    payload = incoming(clock, mid=1, actor=43, text=text)
+    payload['message'].pop('reply_to_message', None)
+    if text.startswith('@'):
+        payload['message']['entities'] = [{'type': 'mention', 'offset': 0, 'length': 13}]
+    await p.handle_update(payload, bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
+    await generated(p)
+    session = state(database, 'sessions')[0]
+    assert session['target_id'] == session['initiator_id'] == 43
+    assert session['mode'] == generator.packs[0].mode == mode
+    assert ('Это диалог' in messages_for(generator.packs[0])[0]['content']) == (mode == 'dialogue')
+    assert len(bot.calls) == (0 if mode == 'dialogue' else 1)
+    assert await p.send_once()
+    if mode == 'dialogue':
+        clock.now += 11
+        reply = incoming(clock, mid=2, actor=43, text='А почему?',
+                         reply=bot.calls[-1].get('message_id', 701))
+        # Fake Telegram returns IDs starting at 701.
+        reply['message']['reply_to_message']['message_id'] = 701
+        await p.handle_update(reply, bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
+        p.due[session['id']] = (0, 0)
+        await generated(p)
+        memory = generator.packs[-1].session_turns
+        assert len(memory) == 1
+        conversation = generator.packs[-1].conversation
+        assert [entry.role for entry in conversation] == ['user', 'assistant']
+        assert conversation[0].author_id == 43
+        assert conversation[1].text == memory[0]
+        assert generator.packs[-1].trigger.text == 'А почему?'
+    await p.aclose()
+
+
+async def test_self_roast_still_requires_consent(scope, monkeypatch):
+    from pozor import commands
+
+    p, database, clock, bot, generator = scope
+    monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
+    with connect(database) as db:
+        db.execute('UPDATE members SET consent=0 WHERE user_id=43')
+    payload = incoming(clock, actor=43, text='/roast меня за опоздание')
+    payload['message'].pop('reply_to_message', None)
+    await p.handle_update(payload, bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
+    assert '/roast_on' in bot.calls[-1]['text']
+    assert not state(database, 'sessions')
+    assert not generator.packs
+    await p.aclose()
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_question_during_roast_preserves_mode_and_replies_to_question(scope, fallback):
+    from pozor.llm import DIALOGUE_FALLBACK, GeneratedRoast
+
+    p, database, clock, bot, generator = scope
+    sid = start(scope)
+    await generated(p)
+    assert await p.send_once()
+    clock.now += 11
+    if fallback:
+        class FailedGenerator:
+            async def generate(self, pack, deadline):
+                generator.packs.append(pack)
+                return GenerationResult(roast=GeneratedRoast(text=DIALOGUE_FALLBACK,
+                                        evidence_ids=[], angle='fallback'), fallback=True)
+        p.generator = FailedGenerator()
+    payload = incoming(clock, mid=25, actor=43, reply=701,
+                       text='@pozor_me_bot как дела?',
+                       entities=[{'type': 'mention', 'offset': 0, 'length': 13}])
+    await p.handle_update(payload, bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
+    p.due[sid] = (0, 0)
+    await generated(p)
+    assert generator.packs[-1].mode == 'roast'
+    assert generator.packs[-1].trigger.text == 'как дела?'
+    assert state(database, 'sessions')[0]['mode'] == 'roast'
+    assert await p.send_once()
+    reply = bot.calls[-1]['reply_parameters']
+    assert reply.message_id == 25
+    assert reply.allow_sending_without_reply is False
+    if fallback:
+        assert bot.calls[-1]['text'] == DIALOGUE_FALLBACK
+    await p.aclose()
+
+
+@pytest.mark.parametrize('address', ['tag', 'tag_target', 'reply_target'])
+async def test_same_target_repeated_address_keeps_round_and_authorship(scope, monkeypatch, address):
+    from pozor import commands
+    p, database, clock, bot, generator = scope
+    monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
+    with connect(database) as db:
+        db.execute("UPDATE members SET current_username='known_user',display_name='Макс' WHERE user_id=42")
+    sid = start(scope)
+    await generated(p)
+    await p.send_once()
+    clock.now += 11
+    text = '@pozor_me_bot продолжай про Reddit'
+    payload = incoming(clock, mid=25, actor=43, text=text)
+    payload['message']['entities'] = [{'type': 'mention', 'offset': 0, 'length': 13}]
+    if address == 'tag_target':
+        payload['message']['text'] = '@pozor_me_bot @known_user продолжай про Reddit'
+        payload['message']['entities'].append({'type': 'mention', 'offset': 14, 'length': 11})
+    if address == 'reply_target':
+        payload['message']['reply_to_message'] = {'message_id': 10, 'from': {'id': 42}}
+    await p.handle_update(payload, bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
+    p.due[sid] = (0, 0)
+    await generated(p)
+    assert len(state(database, 'sessions')) == 1
+    pack = generator.packs[-1]
+    assert pack.target_id == 42 and pack.speaker_id == pack.initiator_id == 43
+    assert pack.trigger.author_id == 43 and pack.target_label == 'Макс'
+    assert pack.mode == 'roast'
+    assert await p.send_once()
+    assert '2/4' in bot.calls[-1]['reply_markup'].inline_keyboard[0][1].text
+    await p.aclose()
+
+
+async def test_delivery_has_time_after_generation_finishes_near_deadline(scope):
+    p, database, clock, _, generator = scope
+    generate = generator.generate
+    async def slow(pack, deadline):
+        result = await generate(pack, deadline)
+        clock.now += 7.5
+        return result
+    generator.generate = slow
+    start(scope)
+    await generated(p)
+    clock.now += 2
+    assert await p.send_once()
+    assert state(database, 'turns')[0]['status'] == 'sent'
+    await p.aclose()
+
+
+async def test_reply_after_closed_round_explains_state(scope):
+    p, database, clock, bot, _ = scope
+    sid = start(scope)
+    await generated(p)
+    await p.send_once()
+    close_session(database, session_id=sid, chat_id=-1001, thread_id=0, actor_id=42)
+    await p.handle_update(incoming(clock, actor=43), bot_id=99,
+                          bot_username='pozor_me_bot', owner_ids=frozenset())
+    assert 'раунд завершён' in bot.calls[-1]['text']
+    assert len(state(database, 'sessions')) == 1
+    await p.aclose()
+
+
+async def test_nonforum_reply_thread_id_does_not_lose_active_round(scope):
+    p, database, clock, _, generator = scope
+    sid = start(scope)
+    await generated(p)
+    await p.send_once()
+    clock.now += 11
+    payload = incoming(clock, mid=25, actor=43, thread=98765, reply=701)
+    payload['message']['is_topic_message'] = False
+    await p.handle_update(payload, bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
+    p.due[sid] = (0, 0)
+    await generated(p)
+    assert len(generator.packs) == 2
+    assert generator.packs[-1].thread_id == 0
+    assert len(state(database, 'sessions')) == 1
     await p.aclose()

@@ -9,11 +9,13 @@ import os
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import qrcode
 import qrcode.image.svg
-from telethon import TelegramClient, errors, utils
+from telethon import TelegramClient, errors, types, utils
+from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.functions.messages import AddChatUserRequest
 
 from pozor.config import Settings
 
@@ -118,17 +120,32 @@ class TelegramAccount:
         self.state = "connected"
         return await self.status()
 
-    async def groups(self, allowed: set[int]) -> list[dict[str, Any]]:
+    async def groups(self, allowed: set[int] | None = None) -> list[dict[str, Any]]:
         await self.open()
         if self.state != "connected":
             raise AccountError("Подключите Telegram по QR-коду.")
         self.entities.clear()
         result = []
         async for dialog in self.client.iter_dialogs():
-            if dialog.is_group and dialog.id in allowed:
+            if dialog.is_group and (allowed is None or dialog.id in allowed):
                 self.entities[dialog.id] = dialog.entity
                 result.append({"id": dialog.id, "title": dialog.name})
         return result
+
+    async def add_bot(self, chat: int, username: str) -> str:
+        groups = await self.groups()
+        group = next((g for g in groups if g['id'] == chat), None)
+        if group is None:
+            raise AccountError("Эта группа недоступна подключённому аккаунту.")
+        entity = self.entities[chat]
+        try:
+            if isinstance(entity, types.Chat):
+                await self.client(AddChatUserRequest(entity.id, username, fwd_limit=0))
+            else:
+                await self.client(InviteToChannelRequest(entity, [username]))
+        except errors.UserAlreadyParticipantError:
+            pass
+        return cast(str, group['title'])
 
     async def history(self, chat: int, targets: set[int], start: datetime,
                       end: datetime, progress: Any) -> dict[int, list[dict[str, Any]]]:
