@@ -30,11 +30,12 @@ class _Job:
 class InferenceQueue:
     def __init__(
         self, wait_idle: Callable[[float], Awaitable[None]], *,
-        capacity: int = 8, background_capacity: int = 16,
+        capacity: int = 8, background_capacity: int = 16, background_timeout: float = 5,
     ):
         if min(capacity, background_capacity) < 1:
             raise ValueError("queue capacity must be positive")
         self.capacity, self.background_capacity = capacity, background_capacity
+        self.background_timeout = background_timeout
         self.wait_idle = wait_idle
         self.chats: OrderedDict[int, deque[_Job]] = OrderedDict()
         self.background: OrderedDict[str, _Job] = OrderedDict()
@@ -65,7 +66,7 @@ class InferenceQueue:
         if background:
             if len(self.background) >= self.background_capacity:
                 raise QueueBusy("background_full")
-            deadline = min(deadline, now + 5)
+            deadline = min(deadline, now + self.background_timeout)
         elif sum(len(q) for q in self.chats.values()) >= self.capacity:
             raise QueueBusy("interactive_full")
         job = _Job(key, chat_id, deadline, factory, asyncio.get_running_loop().create_future(),

@@ -77,15 +77,32 @@ class Evidence(Contract):
         return self
 
 
+class ConversationTurn(Contract):
+    role: Literal["user", "assistant"]
+    author_id: int | None = None
+    text: str
+
+
+class ProfileMemory(Contract):
+    summary: str
+    evidence_ids: list[str]
+
+
 class ContextPack(Contract):
+    mode: Literal["roast", "dialogue"] = "roast"
     chat_id: int
     thread_id: int
     target_id: int
     target_label: str
+    target_username: str | None = None
+    initiator_id: int | None = None
+    speaker_id: int | None = None
     trigger: Evidence
     recent: list[Evidence] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     session_turns: list[str] = Field(default_factory=list)
+    conversation: list[ConversationTurn] = Field(default_factory=list)
+    dossier: list[ProfileMemory] = Field(default_factory=list)
     forbidden_angles: list[str] = Field(default_factory=list)
     evidence_epoch: int = 0
 
@@ -112,11 +129,14 @@ def match_query(text: str) -> str:
     # Version 1 dictionary. Raw MATCH syntax is never passed to SQLite.
     synonyms = {"reddit": "реддит", "реддит": "reddit", "game": "игра", "игра": "game"}
     terms: list[str] = []
+    stop = {'что', 'как', 'кто', 'где', 'когда', 'почему', 'зачем', 'о', 'об', 'в', 'на', 'из', 'за', 'к', 'по', 'и', 'а', 'но', 'у', 'он', 'она', 'его', 'ее', 'мне', 'меня', 'ты', 'тебе', 'тебя', 'это', 'том', 'то', 'же', 'бы', 'ли', 'ну', 'бот', 'прожарь', 'прожарка', 'думаешь', 'думаете', 'скажи', 'расскажи', 'участник', 'пожалуйста'}
     for word in normalize(text).split():
+        if word in stop:
+            continue
         for term in (word, synonyms.get(word, word)):
             if term not in terms and len(terms) < 12:
                 terms.append(term)
-    return " OR ".join('"' + term + '"' for term in terms)
+    return " OR ".join('"' + term + '"' + ('*' if re.fullmatch(r'[а-я]{5,}', term) else '') for term in terms)
 
 
 def fuse(rankings: Sequence[tuple[float, Sequence[str]]], k: int = 60) -> list[str]:
@@ -179,7 +199,8 @@ def retrieve(
             return ids
 
         columns = "SELECT m.*,s.relation,s.attribution"
-        query = match_query(hint)
+        label_words = set(normalize(target_label).split())
+        query = match_query(' '.join(w for w in normalize(hint).split() if w not in label_words))
         lexical = collect(columns + scope + """ AND m.id IN
             (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
             ORDER BY (SELECT rank FROM messages_fts WHERE rowid=m.id
@@ -206,15 +227,32 @@ def retrieve(
             )
         card_ids = collect(columns + scope + " AND m.id IN (SELECT ce.message_id FROM card_evidence ce "
                            "JOIN profile_cards c ON c.id=ce.card_id WHERE c.chat_id=? "
-                           "AND c.target_id=? AND (c.profile_version=2 OR ?=1) "
+                           "AND c.target_id=? AND (c.profile_version IN (2,3) OR ?=1) "
                            "AND c.excluded=0 AND ce.source_text_hash=m.text_hash) "
                            "ORDER BY m.id DESC LIMIT 40", (*params, *params, int(cards_enabled)))
         ranked = fuse(list(zip(weights, [lexical, recent_self, mentions, [*manual_ids, *card_ids]], strict=True)))
+        # The current subject outranks general recency, even when it only occurs
+        # in one older quote. Recent messages must not consume its entire budget.
+        if lexical:
+            matched_parent_ids = tuple(int(eid[8:]) for eid in lexical)
+            placeholders = ','.join('?' for _ in matched_parent_ids)
+            children = collect(columns + scope + ' AND EXISTS (SELECT 1 FROM messages p '
+                'WHERE p.source_namespace=m.source_namespace AND p.source_message_id=m.reply_source_id '
+                f'AND p.id IN ({placeholders})) ORDER BY m.id DESC LIMIT 20', (*params, *matched_parent_ids))
+            query_terms = re.findall(r'"([^"]+)"', query)
+            matching_manual = [eid for eid in manual_ids if any(
+                term in normalize(rows_by_id[eid].text) for term in query_terms)]
+            ranked = list(dict.fromkeys([*lexical, *children, *matching_manual]))
+
         current = collect(columns + scope + """ AND m.origin='live' AND coalesce(m.thread_id,0)=?
             AND m.source_message_id!=? ORDER BY m.occurred_at DESC,m.id DESC LIMIT 20""",
             (*params, thread_id, trigger_id))
         recent = [rows_by_id[eid] for eid in reversed(current)]
-        history = [rows_by_id[eid] for eid in ranked if eid not in current
+        relevant = set(lexical)
+        recent = [item for item in recent if item.evidence_id not in relevant]
+        if lexical:
+            recent = []
+        history = [rows_by_id[eid] for eid in ranked if eid not in {e.evidence_id for e in recent}
                    and not (rows_by_id[eid].source_namespace == f"live:{chat_id}"
                             and rows_by_id[eid].source_message_id == trigger_id)]
         # A parent must itself be entitled to this target; namespace alone is insufficient.
@@ -234,8 +272,23 @@ def retrieve(
                     history.append(parent)
         epoch = db.execute("SELECT epoch FROM data_epochs WHERE chat_id=? AND target_id=?",
                            params).fetchone()
+        dossier = []
+        for card in db.execute("SELECT id,summary FROM profile_cards WHERE chat_id=? AND target_id=? "
+                               "AND profile_version=4 AND excluded=0 ORDER BY id DESC LIMIT 1", params):
+            sources = db.execute("SELECT m.id,m.text_hash,ce.source_text_hash,m.author_id "
+                                 "FROM card_evidence ce JOIN messages m ON m.id=ce.message_id "
+                                 "WHERE ce.card_id=?", (card['id'],)).fetchall()
+            ids = [f"message:{r['id']}" for r in sources]
+            if (ids and all(r['author_id'] == target_id and r['text_hash'] == r['source_text_hash']
+                            for r in sources) and sources_current(db, chat_id, target_id, ids,
+                                                                  datetime.now(UTC).timestamp())):
+                dossier.append(ProfileMemory(summary=card['summary'], evidence_ids=ids))
+        member = db.execute("SELECT current_username,display_name FROM members WHERE chat_id=? AND user_id=?",
+                            (chat_id, target_id)).fetchone()
+        target_username = member[0] if member else None
     return ContextPack(
         chat_id=chat_id, thread_id=thread_id, target_id=target_id, target_label=target_label,
+        target_username=target_username, dossier=dossier,
         trigger=Evidence(evidence_id=f"trigger:{trigger_id}", chat_id=chat_id,
                          allowed_target_id=target_id, source_namespace="request",
                          source_message_id=trigger_id, relation="trigger",

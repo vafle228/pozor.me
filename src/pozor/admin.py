@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from pozor.admin_pipeline import AdminPipeline
+from pozor.commands import set_consent
 from pozor.config import Settings
 from pozor.context import sources_current
 from pozor.llm import SYSTEM
@@ -25,9 +26,11 @@ STATIC = Path(__file__).with_name("admin_static")
 
 
 class AdminData:
-    def __init__(self, database: Path, profiles_enabled: bool = False):
+    def __init__(self, database: Path, profiles_enabled: bool = False,
+                 semantic_profiles_enabled: bool = True):
         self.database = database.resolve()
         self.profiles_enabled = profiles_enabled
+        self.semantic_profiles_enabled = semantic_profiles_enabled
 
     def read(self, path: str, query: dict[str, list[str]]) -> object:
         # A typo must never create an empty production database. No migrations or writes.
@@ -40,6 +43,16 @@ class AdminData:
             db.close()
 
     def _read(self, db: sqlite3.Connection, path: str, query: dict[str, list[str]]) -> object:
+        if path == "/api/members":
+            chat = int(query["chat"][0])
+            if not db.execute("SELECT 1 FROM chats WHERE chat_id=?", (chat,)).fetchone():
+                raise LookupError
+            rows = db.execute("""SELECT m.user_id,m.display_name,m.current_username,
+                m.consent,m.opt_out,EXISTS(SELECT 1 FROM forgotten_members f
+                WHERE f.chat_id=m.chat_id AND f.user_id=m.user_id) AS forgotten
+                FROM members m WHERE m.chat_id=?
+                ORDER BY coalesce(m.display_name,''),m.user_id""", (chat,)).fetchall()
+            return {"members": [dict(row) for row in rows]}
         if path == "/api/chats":
             rows = db.execute("""SELECT c.*,
                 (SELECT count(*) FROM members m WHERE m.chat_id=c.chat_id) AS members,
@@ -47,7 +60,8 @@ class AdminData:
                  WHERE m.scope_chat_id=c.chat_id) AS last_message
                 FROM chats c ORDER BY c.created_at DESC,c.chat_id""").fetchall()
             return {"chats": [dict(row) for row in rows],
-                    "profiles_enabled": self.profiles_enabled}
+                    "profiles_enabled": self.profiles_enabled,
+                    "semantic_profiles_enabled": self.semantic_profiles_enabled}
         if path == "/api/profiles":
             chat = int(query["chat"][0])
             search = query.get("q", [""])[0].strip().casefold()
@@ -78,8 +92,37 @@ class AdminData:
                     cards.append(dict(row) | {"sources": [
                         {k: r[k] for k in ("id", "text", "author_id", "occurred_at",
                                           "source_message_id")} for r in sources]})
-                result.append(dict(member) | {"cards": cards})
+                automatic = db.execute('SELECT state,analyzed,sampled,updated_at,error_code '
+                                       'FROM automatic_profiles WHERE chat_id=? AND target_id=?',
+                                       (chat, member['user_id'])).fetchone()
+                result.append(dict(member) | {"cards": cards,
+                              "automatic": dict(automatic) if automatic else None})
             return {"profiles": result, "total": len(members), "offset": offset}
+        if path == "/api/evidence":
+            chat, target = int(query["chat"][0]), int(query["target"][0])
+            if not db.execute("""SELECT 1 FROM members m WHERE chat_id=? AND user_id=?
+                AND consent=1 AND opt_out=0 AND NOT EXISTS (SELECT 1 FROM forgotten_members f
+                WHERE f.chat_id=m.chat_id AND f.user_id=m.user_id)""", (chat, target)).fetchone():
+                raise LookupError
+            quotes: list[dict[str, object]] = []
+            related: dict[int, dict[str, object]] = {}
+            for row in db.execute("""SELECT m.id,m.text,m.author_id,m.occurred_at,
+                m.source_message_id,m.origin,s.relation,s.attribution
+                FROM messages m JOIN message_subjects s
+                ON s.message_id=m.id WHERE m.scope_chat_id=? AND s.target_id=?
+                AND ((m.author_id=? AND s.relation='self'
+                      AND s.attribution IN ('observed_self','imported_quote'))
+                     OR (m.author_id<>? AND s.relation IN ('mention','reply')
+                         AND s.attribution='third_party'))
+                ORDER BY m.occurred_at DESC,m.id DESC,s.relation DESC""",
+                                  (chat, target, target, target)):
+                if sources_current(db, chat, target, [f"message:{row['id']}"], time.time()):
+                    if row["relation"] == "self":
+                        if len(quotes) < 100:
+                            quotes.append(dict(row))
+                    elif len(related) < 100:
+                        related.setdefault(row["id"], dict(row))
+            return {"quotes": quotes, "related": list(related.values())}
         if path == "/api/prompt":
             return {"system": SYSTEM, "sha256": hashlib.sha256(SYSTEM.encode()).hexdigest(),
                     "source": "src/pozor/prompts/roast_system.txt"}
@@ -140,7 +183,7 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                     if pipeline is None:
                         raise AccountError("Подключение Telegram недоступно в этом запуске.")
                     action = parsed.path.rsplit("/", 1)[-1]
-                    if action not in {"status", "groups", "members", "job"}:
+                    if action not in {"status", "groups", "available_groups", "members", "job"}:
                         raise LookupError
                     query = parse_qs(parsed.query)
                     result = pipeline.call(action, {"chat": query["chat"][0]}
@@ -158,6 +201,18 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                 self.reply(503, b'{"error":"database_unavailable"}')
 
         def do_POST(self) -> None:
+            # Consume bounded bodies before early errors: closing a Windows socket with
+            # unread request data can reset the connection and hide the JSON response.
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                size = 0
+            try:
+                self.connection.settimeout(10)
+                raw_body = self.rfile.read(size) if 0 < size <= 16384 else b""
+            except (TimeoutError, OSError):
+                self.reply(408, b'{}')
+                return
             # Browser cross-origin forms/fetch cannot submit credentials or log out.
             origin = self.headers.get("Origin")
             if origin and origin != "http://" + self.headers.get("Host", ""):
@@ -168,17 +223,36 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                            "SameSite=Strict; Max-Age=0")
                 return
             telegram = self.path.startswith("/api/telegram/")
-            if telegram and not self.authenticated():
+            participation = self.path == "/api/members/roast"
+            if (telegram or participation) and not self.authenticated():
                 self.reply(401, b'{"error":"authentication_required"}')
                 return
-            if self.path != "/api/login" and not telegram:
+            if self.path != "/api/login" and not telegram and not participation:
                 self.reply(404, b'{}')
                 return
             try:
-                size = int(self.headers.get("Content-Length", "0"))
                 if not 0 < size <= 16384:
                     raise ValueError
-                body = json.loads(self.rfile.read(size))
+                body = json.loads(raw_body)
+                if participation:
+                    if (not isinstance(body, dict)
+                            or self.headers.get_content_type() != "application/json"
+                            or type(body.get("chat")) is not int
+                            or type(body.get("user")) is not int
+                            or type(body.get("enabled")) is not bool
+                            or not -(2**63) <= body["chat"] < 2**63
+                            or not 0 < body["user"] < 2**63):
+                        raise ValueError
+                    if not data.database.is_file():
+                        raise sqlite3.OperationalError("missing database")
+                    if not set_consent(data.database, body["chat"], body["user"],
+                                       body["enabled"], respect_forgetting=True):
+                        self.reply(409, json.dumps({"error": "Включите сбор в чате и выберите "
+                            "известного участника. После /forget_me участник должен сам "
+                            "выполнить /roast_on."}, ensure_ascii=False).encode())
+                        return
+                    self.reply(200, b'{}')
+                    return
                 if telegram:
                     if (not isinstance(body, dict) or self.headers.get_content_type()
                             != "application/json"):
@@ -186,7 +260,7 @@ def make_server(data: AdminData, password: str, host: str = "127.0.0.1",
                     if pipeline is None:
                         raise AccountError("Подключение Telegram недоступно в этом запуске.")
                     action = self.path.rsplit("/", 1)[-1]
-                    if action not in {"connect", "password", "disconnect", "start", "cancel", "save"}:
+                    if action not in {"connect", "password", "disconnect", "start", "cancel", "save", "add_chat"}:
                         self.reply(404, b'{}')
                         return
                     result = pipeline.call(action, body)
@@ -233,7 +307,8 @@ def main() -> None:
         parser.error("База не найдена. Укажите существующую базу бота через --database.")
     pipeline = AdminPipeline(database, settings)
     try:
-        server = make_server(AdminData(database, settings.profile_cards_enabled),
+        server = make_server(AdminData(database, settings.profile_cards_enabled,
+                                       settings.semantic_profiles_enabled),
                              password, port=args.port, pipeline=pipeline)
     except ValueError as exc:
         pipeline.close()

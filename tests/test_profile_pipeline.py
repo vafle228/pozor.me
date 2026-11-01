@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from telethon import errors, types
 
 from pozor import admin_pipeline, semantic_profiles
@@ -148,12 +149,108 @@ def test_scope_bad_input_and_duplicate_jobs(pipeline):
     assert pipeline.call("job")["drafts"] == []
 
 
+def test_add_group_invites_bot_and_survives_allowlist_sync(pipeline, database, monkeypatch):
+    from pozor.ingestion import sync_chat_allowlist
+
+    pipeline.settings.bot_token = SecretStr("123456:synthetic-token")
+    pipeline.account.groups.return_value = [{"id": -3, "title": "New group"},
+                                            {"id": -4, "title": "Failed group"}]
+    pipeline.account.add_bot = AsyncMock(return_value="New group")
+    bot = SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(id=99, username="test_bot")),
+                          get_chat_member=AsyncMock(side_effect=[SimpleNamespace(status="left"),
+                                                                 SimpleNamespace(status="member")]))
+
+    class FakeBot:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return bot
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(admin_pipeline, "Bot", FakeBot)
+    assert pipeline.call("add_chat", {"chat": -3}) == {"chat": -3, "title": "New group"}
+    pipeline.account.add_bot.assert_awaited_once_with(-3, "test_bot")
+    sync_chat_allowlist(database, [-1])
+    with connect(database) as db:
+        chat = db.execute("SELECT * FROM chats WHERE chat_id=-3").fetchone()
+    assert chat["allowed"] == chat["enabled"] == chat["managed_by_admin"] == 1
+    # Enabling an already present bot does not need permission to invite members.
+    bot.get_chat_member.side_effect = None
+    bot.get_chat_member.return_value = SimpleNamespace(status="member")
+    pipeline.account.add_bot.reset_mock()
+    assert pipeline.call("add_chat", {"chat": -3})["chat"] == -3
+    pipeline.account.add_bot.assert_not_awaited()
+    bot.get_chat_member.return_value.status = "left"
+    with pytest.raises(AccountError, match="не подтвердил"):
+        pipeline.call("add_chat", {"chat": -4})
+    with connect(database) as db:
+        assert db.execute("SELECT 1 FROM chats WHERE chat_id=-4").fetchone() is None
+
+
+def test_history_groups_show_disabled_chats_without_granting_access(pipeline, database):
+    pipeline.account.groups.return_value = [
+        {"id": -1, "title": "Enabled"}, {"id": -2, "title": "Discovered"},
+        {"id": -99, "title": "Not registered"},
+    ]
+    assert pipeline.call("groups") == {"groups": [
+        {"id": -1, "title": "Enabled", "enabled": True},
+        {"id": -2, "title": "Discovered", "enabled": False},
+    ]}
+    pipeline.account.groups.assert_awaited_once_with({-1, -2})
+    with pytest.raises(AccountError, match="не разрешена"):
+        pipeline.call("members", {"chat": -2})
+    with connect(database) as db:
+        db.execute("UPDATE chats SET allowed=1,enabled=1 WHERE chat_id=-2")
+    assert pipeline.call("groups")["groups"][1]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_account_discovers_all_groups_and_invites_only_accessible_group(tmp_path):
+    account = TelegramAccount(Settings(_env_file=None), tmp_path)
+    account.state = "connected"
+
+    async def dialogs():
+        for chat, group in [(-1, True), (-2, True), (42, False)]:
+            yield SimpleNamespace(id=chat, is_group=group, name=str(chat),
+                                  entity=types.Chat(id=-chat, title=str(chat), photo=types.ChatPhotoEmpty(),
+                                                    participants_count=1, date=datetime.now(UTC), version=1))
+
+    client = AsyncMock()
+    client.iter_dialogs = dialogs
+    account.client = client
+    assert len(await account.groups()) == 2
+    assert len(await account.groups({-1})) == 1
+    assert await account.add_bot(-2, "test_bot") == "-2"
+    assert client.await_args.args[0].chat_id == 2
+    with pytest.raises(AccountError, match="недоступна"):
+        await account.add_bot(-3, "test_bot")
+
+
 def test_unexpected_worker_error_finishes_without_leaking_payload(pipeline, caplog):
     pipeline.account.history = AsyncMock(side_effect=RuntimeError("private source text"))
     start_job(pipeline)
     job = wait_job(pipeline)
     assert job["state"] == "failed"
     assert "private source text" not in str(job) + caplog.text
+
+
+def test_model_failure_reports_analysis_and_keeps_imported_quotes(database, pipeline, monkeypatch):
+    from pozor.llm import InferenceError
+
+    monkeypatch.setattr(semantic_profiles, "analyze", AsyncMock(
+        side_effect=InferenceError("private model payload")))
+    start_job(pipeline)
+    job = wait_job(pipeline)
+    assert job["state"] == "failed"
+    assert job["stage"] == "analysis"
+    assert job["imported"] == 1
+    assert "модель" in job["message"]
+    assert "private model payload" not in str(job)
+    with connect(database) as db:
+        assert db.execute("SELECT count(*) FROM imports WHERE status='active'").fetchone()[0] == 1
 
 
 def test_forget_while_downloading_prevents_import(database, pipeline):

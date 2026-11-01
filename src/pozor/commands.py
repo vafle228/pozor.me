@@ -18,7 +18,9 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from pozor.privacy import blocked
 from pozor.storage import connect
+from pozor.telegram_scope import topic_id
 
 _COMMAND = re.compile(r"^/(?P<name>[A-Za-z_]+)(?:@(?P<bot>[A-Za-z0-9_]+))?(?:\s|$)")
 
@@ -29,6 +31,8 @@ class ParsedCommand:
     argument: str
     username_targets: tuple[str, ...]
     numeric_targets: tuple[int, ...] = ()
+    target_labels: tuple[str, ...] = ()
+    conversational: bool = False
 
     @property
     def target_count(self) -> int:
@@ -114,7 +118,7 @@ def decide_incoming(session: SessionClock, event: IncomingEvent, now: int) -> st
     authorized = event.actor_id in (session.target_id, session.initiator_id) or event.admin
     if authorized and (event.stop or event.finish):
         return "close:explicit"
-    if event.actor_id != session.target_id or not event.addresses_session:
+    if event.actor_id not in (session.target_id, session.initiator_id) or not event.addresses_session:
         return "ignore"
     if session.last_sent_at is None:
         return "ignore"
@@ -146,7 +150,11 @@ def parse_command(
     match = _COMMAND.match(text)
     mention_call = None
     if match is None and bot_username:
-        mention_call = re.match(r"^@" + re.escape(bot_username) + r"\s+попусти(?:\s|$)", text, re.IGNORECASE)
+        mention_call = re.match(
+            r"^@" + re.escape(bot_username)
+            + r"(?=\s|$)(?:\s+(?:попусти|прожарь|roast)(?=\s|$))?\s*",
+            text, re.IGNORECASE,
+        )
         if mention_call and not any(
             e.get("type") == "mention" and e.get("offset") == 0
             and e.get("length") == len(bot_username) + 1
@@ -164,6 +172,7 @@ def parse_command(
         return None
     targets: list[str] = []
     numeric_targets: list[int] = []
+    target_labels: list[str] = []
     for entity in entities:
         if entity.get("type") not in {"mention", "text_mention"}:
             continue
@@ -178,6 +187,7 @@ def parse_command(
             user_id = user.get("id") if isinstance(user, dict) else None
             if fragment is not None and type(user_id) is int and user_id > 0:
                 numeric_targets.append(user_id)
+                target_labels.append(fragment)
         elif fragment and fragment.startswith("@") and re.fullmatch(r"@[A-Za-z0-9_]{5,32}", fragment):
             targets.append(fragment[1:].casefold())
     consumed = match.end() if match else mention_call.end()  # type: ignore[union-attr]
@@ -186,11 +196,22 @@ def parse_command(
         text[consumed:].strip(),
         tuple(dict.fromkeys(targets)),
         tuple(dict.fromkeys(numeric_targets)),
+        tuple(dict.fromkeys(target_labels)),
+        bool(mention_call and not re.search(r"\s(?:попусти|прожарь|roast)(?=\s|$)", mention_call.group(), re.IGNORECASE)),
     )
 
 
 def utc_now() -> int:
     return int(datetime.now(UTC).timestamp())
+
+
+def roast_hint(command: ParsedCommand, target_label: str = '') -> str:
+    hint = command.argument
+    for label in command.target_labels:
+        hint = hint.replace(label, target_label, 1)
+    for username in command.username_targets:
+        hint = re.sub(r'@' + re.escape(username) + r'\b', lambda _: target_label, hint, flags=re.IGNORECASE)
+    return hint.strip()
 
 
 def _member_user_id(connection: sqlite3.Connection, chat_id: int, username: str, now: int) -> int | None:
@@ -221,6 +242,12 @@ def resolve_target(
     now: int | None = None,
 ) -> int | None:
     """Resolve only numeric reply identity or one observed local username alias."""
+    if parsed.target_count == 0 and re.match(r"^(?:меня|себя|me)(?=\s|$)", parsed.argument, re.IGNORECASE):
+        return context.actor_id
+    if parsed.target_count == 0 and (parsed.conversational or not parsed.argument) and (
+        context.reply_user_id is None or context.reply_is_bot
+    ):
+        return context.actor_id
     if context.reply_is_bot:
         return None
     if parsed.target_count > 1:
@@ -273,10 +300,14 @@ def set_chat_enabled(database_path: Path, chat_id: int, enabled: bool) -> bool:
         return cursor.rowcount == 1
 
 
-def set_consent(database_path: Path, chat_id: int, user_id: int, consent: bool) -> bool:
+def set_consent(database_path: Path, chat_id: int, user_id: int, consent: bool,
+                *, respect_forgetting: bool = False) -> bool:
     """Set per-chat opt-in; opt-out closes every active session for that target."""
     with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         if not _command_allowed(connection, chat_id, require_enabled=True):
+            return False
+        if respect_forgetting and blocked(connection, chat_id, user_id):
             return False
         cursor = connection.execute(
             "UPDATE members SET consent=?, opt_out=?, consent_version=consent_version+1 "
@@ -323,6 +354,8 @@ def start_session(
     initiator_id: int,
     trigger_message_id: int,
     now: int | None = None,
+    material_available: bool = True,
+    mode: Literal["roast", "dialogue"] = "roast",
 ) -> str:
     """Create one bounded active session per topic, enforcing consent and cooldowns."""
     timestamp = utc_now() if now is None else now
@@ -340,8 +373,6 @@ def start_session(
             raise CommandError("Существующая сессия повреждена")
         if not _command_allowed(connection, chat_id, require_enabled=True):
             raise CommandError("Чат не включён оператором")
-        if target_id == initiator_id:
-            raise CommandError("Нельзя выбрать себя целью")
         member = connection.execute(
             "SELECT consent, opt_out FROM members WHERE chat_id=? AND user_id=?",
             (chat_id, target_id),
@@ -353,11 +384,6 @@ def start_session(
             (chat_id, target_id),
         ).fetchone() is None:
             raise CommandError("Участник не найден в этом чате")
-        if connection.execute(
-            "SELECT 1 FROM sessions WHERE chat_id=? AND thread_id=? AND state='active'",
-            (chat_id, thread_id),
-        ).fetchone():
-            raise CommandError("В этой теме уже идёт сессия")
         target_cd = connection.execute(
             "SELECT until_at FROM command_cooldowns WHERE chat_id=? AND user_id=? AND kind='target'",
             (chat_id, target_id),
@@ -367,24 +393,32 @@ def start_session(
             (chat_id, initiator_id),
         ).fetchone()
         if target_cd and timestamp < target_cd["until_at"]:
-            raise CommandError("Для участника действует cooldown")
+            raise CommandError(f"До следующей прожарки участника осталось {target_cd['until_at'] - timestamp} с.")
         if initiator_cd and timestamp < initiator_cd["until_at"]:
-            raise CommandError("Для инициатора действует cooldown")
+            raise CommandError(f"До следующего запуска осталось {initiator_cd['until_at'] - timestamp} с.")
+        if not material_available:
+            raise CommandError("Пока нет материала для прожарки. Ответьте /roast на сообщение участника "
+                               "или добавьте тему после команды. Для истории чата отключите privacy mode у бота.")
+        connection.execute(
+            "UPDATE sessions SET state='closed',closed_reason='replaced',revision=revision+1 "
+            "WHERE chat_id=? AND thread_id=? AND state='active'",
+            (chat_id, thread_id),
+        )
         connection.execute(
             """INSERT INTO sessions
-               (id, chat_id, thread_id, target_id, initiator_id, state, created_at, trigger_message_id)
-               VALUES (?, ?, ?, ?, ?, 'active', ?, ?)""",
-            (session_id, chat_id, thread_id, target_id, initiator_id, timestamp, trigger_message_id),
+               (id, chat_id, thread_id, target_id, initiator_id, state, created_at, trigger_message_id, mode)
+               VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+            (session_id, chat_id, thread_id, target_id, initiator_id, timestamp, trigger_message_id, mode),
         )
         connection.execute(
             """INSERT INTO command_cooldowns VALUES (?, ?, 'target', ?)
                ON CONFLICT(chat_id,user_id,kind) DO UPDATE SET until_at=excluded.until_at""",
-            (chat_id, target_id, timestamp + 600),
+            (chat_id, target_id, timestamp + 10),
         )
         connection.execute(
             """INSERT INTO command_cooldowns VALUES (?, ?, 'initiator', ?)
                ON CONFLICT(chat_id,user_id,kind) DO UPDATE SET until_at=excluded.until_at""",
-            (chat_id, initiator_id, timestamp + 30),
+            (chat_id, initiator_id, timestamp + 10),
         )
     return session_id
 
@@ -513,7 +547,7 @@ async def handle_telegram_update(
         )
         if action is None or session_id is None:
             return
-        thread = message.get("message_thread_id")
+        thread = topic_id(message)
         closed = close_session(
             database_path, session_id=session_id, chat_id=chat["id"],
             thread_id=thread if type(thread) is int else 0, actor_id=user_id,
@@ -550,7 +584,7 @@ async def handle_telegram_update(
     message_id = raw.get("message_id")
     if type(message_id) is not int:
         return
-    thread = raw.get("message_thread_id")
+    thread = topic_id(raw)
     thread_id = thread if type(thread) is int else 0
     reply = raw.get("reply_to_message")
     reply_user = reply.get("from") if isinstance(reply, dict) else None
@@ -619,13 +653,16 @@ async def handle_telegram_update(
             if set_chat_enabled(database_path, chat_id, enabled):
                 response = "Чат включён." if enabled else "Чат выключен; активные сессии завершены."
             else:
-                response = "Чат отсутствует в настроенном CHAT_ALLOWLIST."
+                response = "Чат не подключён. Включите его через админку в разделе «Чаты» или «История Telegram»."
     elif parsed.name == "help":
         response = (
             "/enable_chat, /disable_chat — включить или выключить группу (администратор);\n"
             "/whois — ответом на сообщение; /roast_on, /roast_off — согласие участника;\n"
-            "/roast @username или ответом на сообщение — начать сессию; /stop, /finish — завершить."
+            "/roast меня — прожарить себя; /roast @username или ответом — прожарить участника; /stop, /finish — завершить."
         )
+        response += ("\nДля диалога просто обратись: @" + bot_username + " как дела? Для прожарки ответь на сообщение: @" + bot_username + " попусти. "
+                     "Для вызова тегом бот должен видеть сообщения группы (privacy mode выключен "
+                     "или бот — администратор).") if bot_username else ""
         response += "\n/roast_off выключает участие; /forget_me удаляет данные этой группы."
     elif parsed.name == "whois":
         if context.reply_user_id is None or context.reply_is_bot:
@@ -660,11 +697,33 @@ async def handle_telegram_update(
                 response = "Укажите одного известного участника username или ответом на его сообщение."
             else:
                 try:
+                    from pozor.context import retrieve
+                    from pozor.ingestion import capture_reply_context
+
+                    with connect(database_path) as connection:
+                        if not _command_allowed(connection, chat_id, require_enabled=True):
+                            raise CommandError("Чат не включён оператором")
+                    mode: Literal["roast", "dialogue"] = "dialogue" if (parsed.conversational and parsed.target_count == 0
+                                          and (context.reply_user_id is None or context.reply_is_bot)
+                                          and not re.match(r"^(?:меня|себя|me)(?=\s|$)", parsed.argument, re.IGNORECASE)) else "roast"
+                    capture_reply_context(database_path, raw, target)
+                    hint = roast_hint(parsed)
+                    context_pack = retrieve(database_path, chat_id=chat_id, thread_id=thread_id,
+                                            target_id=target, trigger_id=message_id, hint=hint,
+                                            target_label="участник")
                     session_id = start_session(
                         database_path, chat_id=chat_id, thread_id=thread_id,
                         target_id=target, initiator_id=actor_id, trigger_message_id=message_id,
+                        material_available=mode == "dialogue" or bool(hint or context_pack.recent or context_pack.evidence),
+                        mode=mode,
                     )
-                    response = f"Сессия начата для user_id={target}. Используйте /stop, чтобы остановить."
+                    with connect(database_path) as connection:
+                        member = connection.execute('SELECT display_name FROM members WHERE chat_id=? AND user_id=?',
+                                                    (chat_id, target)).fetchone()
+                    label = member['display_name'] if member and member['display_name'] else 'участник'
+                    response = '' if mode == 'dialogue' else (
+                        f'Цель прожарки: {label}. Раунд — до 4 ответов. '
+                        'Продолжай тегом бота или ответом на панч; цель останется той же. /stop — завершить.')
                     reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(text="Стоп", callback_data=callback_data("stop", session_id)),
                         InlineKeyboardButton(text="Завершить", callback_data=callback_data("finish", session_id)),
@@ -698,7 +757,7 @@ async def handle_telegram_update(
             "INSERT OR IGNORE INTO command_receipts(chat_id, message_id, result_text) VALUES (?, ?, ?)",
             (chat_id, message_id, response),
         )
-    if cursor.rowcount:
+    if cursor.rowcount and response:
         await bot.send_message(
             chat_id=chat_id, text=response, message_thread_id=thread_id or None,
             reply_markup=reply_markup, parse_mode=None,

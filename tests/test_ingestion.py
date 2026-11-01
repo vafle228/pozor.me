@@ -25,7 +25,7 @@ def _message_update(update_id: int, *, chat_id: int = -1001, message_id: int = 7
         "message": {
             "message_id": message_id,
             "date": 1793400000,
-            "message_thread_id": 4,
+            "message_thread_id": 4, "is_topic_message": True,
             "chat": {"id": chat_id, "type": "supergroup"},
             "from": {"id": 42, "first_name": "Alex", "username": "alex"},
             "text": text,
@@ -72,8 +72,68 @@ def test_poll_persists_updates_and_offset_before_next_fetch(db_path: Path) -> No
     assert current_offset(db_path, 999) == 101
     assert source.calls[0]["offset"] is None
     assert source.calls[0]["allowed_updates"] == [
-        "message", "edited_message", "channel_post", "edited_channel_post", "callback_query"
+        "message", "edited_message", "channel_post", "edited_channel_post", "callback_query",
+        "my_chat_member",
     ]
+
+
+def test_aiogram_nested_aliases_and_timestamps_preserve_wire_contract(db_path):
+    from aiogram.types import Update
+
+    from pozor.ingestion import _as_mapping
+
+    payload = _message_update(930)
+    payload['message']['from']['is_bot'] = False
+    payload['message']['reply_to_message'] = dict(payload['message'], message_id=6)
+    update = Update.model_validate(payload)
+    mapped = _as_mapping(update)
+    assert mapped['message']['from']['id'] == 42
+    assert mapped['message']['reply_to_message']['from']['id'] == 42
+    assert isinstance(mapped['message']['date'], int)
+    _persist_batch(db_path, 999, [update])
+    process_pending(db_path)
+    with connect(db_path) as db:
+        assert db.execute('SELECT author_id FROM messages').fetchone()[0] == 42
+    callback = Update.model_validate({'update_id': 931, 'callback_query': {
+        'id': 'synthetic', 'chat_instance': 'synthetic',
+        'from': payload['message']['from'], 'message': payload['message'],
+        'data': 'pozor:v1:stop:synthetic',
+    }})
+    assert _as_mapping(callback)['callback_query']['from']['id'] == 42
+
+
+@pytest.mark.parametrize("location", ["message", "reply", "callback"])
+def test_link_preview_defaults_do_not_block_polling(db_path, location):
+    from aiogram.types import Update
+
+    from pozor.ingestion import _as_mapping
+
+    payload = _message_update(940)
+    message = payload["message"]
+    message["from"]["is_bot"] = False
+    preview = {"is_disabled": False, "url": "https://example.org"}
+    if location == "reply":
+        message["reply_to_message"] = dict(message, message_id=6, link_preview_options=preview)
+    else:
+        message["link_preview_options"] = preview
+    if location == "callback":
+        payload = {"update_id": 940, "callback_query": {
+            "id": "synthetic", "chat_instance": "synthetic",
+            "from": message["from"], "message": message, "data": "stop",
+        }}
+    update = Update.model_validate(payload)
+    mapped = _as_mapping(update)
+    mapped_message = (mapped["callback_query"]["message"] if location == "callback"
+                      else mapped["message"])
+    if location == "reply":
+        mapped_message = mapped_message["reply_to_message"]
+    assert mapped_message["link_preview_options"] == preview
+    assert mapped_message["from"]["is_bot"] is False
+    following = _message_update(941, message_id=8)
+    following["message"]["from"]["is_bot"] = False
+    source = FakeSource([update, Update.model_validate(following)])
+    assert _run_immediate(poll_once(source, db_path, 999)) >= 1
+    assert current_offset(db_path, 999) == 942
 
 
 def test_t4_live_reply_link_persists_and_foreign_parent_is_rejected(db_path):
@@ -424,3 +484,58 @@ def test_retry_backoff_is_bounded_and_stoppable(db_path: Path, monkeypatch) -> N
     _run_immediate(run_poller(source, db_path, 999, retry_delay=0.5, max_retry_delay=0.75, stop_event=stop))
     assert delays == [0.5, 0.75]
     assert source.calls == 3
+
+
+def _membership_update(update_id=1100, *, chat_id=-2002, status="member", **member_fields):
+    return {"update_id": update_id, "my_chat_member": {
+        "chat": {"id": chat_id, "type": "supergroup", "title": "Новая группа"},
+        "from": {"id": 42, "first_name": "Private inviter"},
+        "new_chat_member": {"user": {"id": 999, "is_bot": True},
+                            "status": status, **member_fields},
+    }}
+
+
+@pytest.mark.parametrize("status,fields", [
+    ("member", {}), ("administrator", {}), ("restricted", {"is_member": True}),
+])
+def test_join_discovers_chat_without_collecting_messages(db_path, status, fields):
+    from pozor.admin import AdminData
+
+    source = FakeSource([_membership_update(status=status, **fields),
+                         _message_update(1101, chat_id=-2002, text="Private text")])
+    assert _run_immediate(poll_once(source, db_path, 999)) == 0
+    assert current_offset(db_path, 999) == 1102
+    chats = AdminData(db_path).read("/api/chats", {})["chats"]
+    chat = next(c for c in chats if c["chat_id"] == -2002)
+    assert chat["title"] == "Новая группа"
+    assert chat["allowed"] == chat["enabled"] == chat["managed_by_admin"] == 0
+    with connect(db_path) as db:
+        assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM inbox").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM members").fetchone()[0] == 0
+
+
+def test_join_preserves_existing_permissions_and_is_idempotent(db_path):
+    update = _membership_update(chat_id=-1001)
+    _persist_batch(db_path, 999, [update, update])
+    sync_chat_allowlist(db_path, [-1001])
+    with connect(db_path) as db:
+        chat = db.execute("SELECT * FROM chats WHERE chat_id=-1001").fetchone()
+        assert chat["title"] == "Новая группа"
+        assert chat["allowed"] == chat["enabled"] == 1
+        assert db.execute("SELECT count(*) FROM chats").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("kind", ["left", "kicked", "restricted", "private", "other_bot"])
+def test_non_group_join_does_not_discover_chat(db_path, kind):
+    update = _membership_update()
+    event = update["my_chat_member"]
+    if kind == "private":
+        event["chat"]["type"] = "private"
+    elif kind == "other_bot":
+        event["new_chat_member"]["user"]["id"] = 123
+    else:
+        event["new_chat_member"]["status"] = kind
+    _persist_batch(db_path, 999, [update])
+    with connect(db_path) as db:
+        assert db.execute("SELECT count(*) FROM chats").fetchone()[0] == 1

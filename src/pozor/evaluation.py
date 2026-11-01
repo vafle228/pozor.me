@@ -192,17 +192,18 @@ async def benchmark(suite: Path, *, live: bool = False, repeat: int = 1) -> dict
         if live:
             settings = Settings()
             async with LlamaClient(settings) as client:
-                await client.check(asyncio.get_running_loop().time() + 8)
+                budget = settings.generation_deadline_seconds
+                await client.check(asyncio.get_running_loop().time() + budget)
                 generator = Generator(client)
                 for _ in range(3):
-                    await generator.generate(packs[0], asyncio.get_running_loop().time() + 8)
+                    await generator.generate(packs[0], asyncio.get_running_loop().time() + budget)
                 for index, pack in enumerate(packs):
                     if cases[index].category == "control":
                         continue
                     for _ in range(repeat):
                         before = time.perf_counter()
                         result = await generator.generate(
-                            pack, asyncio.get_running_loop().time() + 8
+                            pack, asyncio.get_running_loop().time() + budget
                         )
                         elapsed = (time.perf_counter() - before) * 1000
                         durations.append(elapsed)
@@ -227,6 +228,10 @@ async def benchmark(suite: Path, *, live: bool = False, repeat: int = 1) -> dict
         else None
     )
     report["retrieval_pass"] = all(r["retrieval_pass"] for r in report["results"])
+    report["model_pass"] = (
+        all(not g["fallback"] for r in report["results"] for g in r["generations"])
+        if live else None
+    )
     report["model_latency_ms"] = (
         {
             "p50": statistics.median(durations),

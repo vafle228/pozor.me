@@ -145,6 +145,20 @@ def test_cli_backup_restore(database, monkeypatch, tmp_path):
     assert runner.invoke(app, args).exit_code == 1
 
 
+def test_rotation_preserves_glob_lookalikes_and_directories(database, tmp_path):
+    directory = tmp_path / 'backups'
+    directory.mkdir()
+    lookalike = directory / ('pozor-backup-abcdefghTabcdefZ-' + 'x' * 32 + '.sqlite3')
+    lookalike.write_text('operator data')
+    folder = directory / ('pozor-backup-20200101T000000Z-' + 'a' * 32 + '.sqlite3')
+    folder.mkdir()
+    for path in (lookalike, folder):
+        os.utime(path, (time.time() - 8 * 86400,) * 2)
+    assert backup(database, directory).exists()
+    assert lookalike.read_text() == 'operator data'
+    assert folder.is_dir()
+
+
 def test_deployment_checks_file_hashes_configuration_and_missing_baseline(tmp_path):
     model, server = tmp_path / 'synthetic.gguf', tmp_path / 'synthetic.exe'
     model.write_bytes(b'synthetic model, no weights')

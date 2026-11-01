@@ -69,6 +69,15 @@ def test_logging_formatter_redacts_credentials_from_tracebacks() -> None:
     assert output.count("[REDACTED]") >= 2
 
 
+def test_doctor_preserves_existing_probe_filename(tmp_path):
+    sentinel = tmp_path / ".pozor-write-check"
+    sentinel.write_text("existing data")
+    checks = run_checks(Settings(database_path=tmp_path / "db.sqlite3"))
+    assert next(c for c in checks if c.name == "data_directory").ok
+    assert sentinel.read_text() == "existing data"
+    assert list(tmp_path.iterdir()) == [sentinel]
+
+
 def test_configured_logging_redacts_bot_and_llm_secrets() -> None:
     settings = Settings(
         _env_file=None,

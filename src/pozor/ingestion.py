@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pozor.storage import connect
+from pozor.telegram_scope import topic_id
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,14 @@ def _as_mapping(update: Any) -> Mapping[str, Any]:
     if isinstance(update, Mapping):
         return update
     if hasattr(update, "model_dump"):
-        result = update.model_dump(mode="json", exclude_none=True)
+        # aiogram uses Python-safe names (from_user), while our durable contract
+        # and Telegram JSON use aliases (from), including nested replies/callbacks.
+        # Nested LinkPreviewOptions contain aiogram Default sentinels for fields
+        # absent from Telegram's response. Preserve explicit wire values (even
+        # False), but do not serialize those client-side defaults.
+        result = update.model_dump(
+            mode="json", exclude_none=True, exclude_unset=True, by_alias=True
+        )
         if isinstance(result, Mapping):
             return result
     raise IngestionError("update is not a Bot API mapping")
@@ -236,9 +244,7 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
     author_id = author.get("id") if isinstance(author, Mapping) else None
     if isinstance(author_id, bool) or not isinstance(author_id, int):
         author_id = None
-    thread_id = message.get("message_thread_id")
-    if isinstance(thread_id, bool) or not isinstance(thread_id, int):
-        thread_id = None
+    thread_id = topic_id(message)
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     reply = message.get("reply_to_message")
     reply_source_id = reply.get("message_id") if isinstance(reply, Mapping) else None
@@ -350,6 +356,41 @@ def _apply_message(connection: sqlite3.Connection, payload: Mapping[str, Any]) -
                 )
 
 
+def capture_reply_context(database_path: Path, message: Mapping[str, Any], target_id: int) -> str | None:
+    """Retain an explicitly selected reply even when privacy mode hid its original update.
+
+    Never replace an already observed edit with an older embedded reply snapshot.
+    Only same-chat/topic, unforwarded text by the consenting target is eligible.
+    """
+    reply = message.get('reply_to_message')
+    chat = message.get('chat')
+    if not isinstance(reply, Mapping) or not isinstance(chat, Mapping):
+        return None
+    parent_chat, author = reply.get('chat'), reply.get('from')
+    if (not isinstance(parent_chat, Mapping) or parent_chat.get('id') != chat.get('id')
+            or not isinstance(author, Mapping) or author.get('id') != target_id
+            or author.get('is_bot') or reply.get('sender_chat') or reply.get('forward_origin')
+            or topic_id(reply) != topic_id(message)
+            or type(reply.get('message_id')) is not int
+            or type(reply.get('date')) not in (int, float)):
+        return None
+    with connect(database_path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        if db.execute('SELECT 1 FROM members WHERE chat_id=? AND user_id=? AND consent=1 '
+                      'AND opt_out=0', (chat.get('id'), target_id)).fetchone() is None:
+            return None
+        if not db.execute('SELECT 1 FROM messages WHERE source_namespace=? AND source_message_id=?',
+                          (f"live:{chat.get('id')}", reply['message_id'])).fetchone():
+            selected = {key: value for key, value in reply.items() if key != 'reply_to_message'}
+            _apply_message(db, {'message': selected})
+        row = db.execute("SELECT m.text FROM messages m JOIN chats c ON c.chat_id=m.scope_chat_id "
+                         "WHERE c.allowed=1 AND c.enabled=1 AND m.author_id=? "
+                         "AND m.source_namespace=? AND m.source_message_id=? AND "
+                         "julianday(m.occurred_at,'+' || c.retention_days || ' days')>julianday('now')",
+                         (target_id, f"live:{chat.get('id')}", reply['message_id'])).fetchone()
+        return row[0] if row else None
+
+
 def _persist_batch(
     database_path: Path,
     bot_id: int,
@@ -400,6 +441,27 @@ def _persist_batch(
     with connect(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         for update_id, payload, chat_id, migration_target, is_control_event in serialized:
+            # Membership is discovery metadata, independent of permission to collect
+            # messages. Persist it with the offset, without retaining the inviter.
+            membership = json.loads(payload).get("my_chat_member")
+            if isinstance(membership, Mapping):
+                chat = membership.get("chat")
+                member = membership.get("new_chat_member")
+                user = member.get("user") if isinstance(member, Mapping) else None
+                if (isinstance(chat, Mapping) and type(chat.get("id")) is int
+                        and chat.get("type") in {"group", "supergroup"}
+                        and isinstance(member, Mapping)
+                        and isinstance(user, Mapping) and user.get("id") == bot_id
+                        and (member.get("status") in {"member", "administrator", "creator"}
+                             or (member.get("status") == "restricted"
+                                 and member.get("is_member") is True))):
+                    title = chat.get("title")
+                    connection.execute(
+                        """INSERT INTO chats(chat_id, title) VALUES (?, ?)
+                           ON CONFLICT(chat_id) DO UPDATE SET
+                             title = coalesce(excluded.title, chats.title)""",
+                        (chat["id"], title if isinstance(title, str) else None),
+                    )
             if chat_id is None:
                 continue
             source_is_allowed = connection.execute(
@@ -473,7 +535,8 @@ async def poll_once(
     updates = await source.get_updates(
         offset=offset,
         timeout=timeout,
-        allowed_updates=["message", "edited_message", "channel_post", "edited_channel_post", "callback_query"],
+        allowed_updates=["message", "edited_message", "channel_post", "edited_channel_post",
+                         "callback_query", "my_chat_member"],
     )
     _persist_batch(database_path, bot_id, updates)
     if control_handler is not None:
@@ -546,7 +609,7 @@ def sync_chat_allowlist(
         raise ValueError("chat allowlist must not contain duplicate IDs")
     with connect(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("UPDATE chats SET allowed = 0")
+        connection.execute("UPDATE chats SET allowed = 0 WHERE managed_by_admin = 0")
         for chat_id in normalized:
             if retention_days is None:
                 connection.execute(
@@ -568,12 +631,12 @@ def _migrate_chat_scope(connection: sqlite3.Connection, old_chat_id: int, new_ch
     """Move all durable identity references in one transaction or leave them untouched."""
     if old_chat_id == new_chat_id:
         return
-    old = connection.execute("SELECT 1 FROM chats WHERE chat_id = ?", (old_chat_id,)).fetchone()
+    old = connection.execute("SELECT * FROM chats WHERE chat_id = ?", (old_chat_id,)).fetchone()
     if old is None:
         # Telegram can repeat the service update after the first atomic migration.
         return
     destination = connection.execute(
-        "SELECT allowed, enabled FROM chats WHERE chat_id = ?", (new_chat_id,)
+        "SELECT * FROM chats WHERE chat_id = ?", (new_chat_id,)
     ).fetchone()
     if destination is not None:
         has_data = any(
@@ -648,6 +711,9 @@ def _migrate_chat_scope(connection: sqlite3.Connection, old_chat_id: int, new_ch
     )
     connection.execute("UPDATE forgotten_members SET chat_id=? WHERE chat_id=?", (new_chat_id, old_chat_id))
     connection.execute("DELETE FROM members WHERE chat_id = ?", (old_chat_id,))
+    connection.execute("UPDATE chats SET managed_by_admin=?,title=? WHERE chat_id=?",
+                       (old["managed_by_admin"] or (destination["managed_by_admin"] if destination else 0),
+                        old["title"] or (destination["title"] if destination else None), new_chat_id))
     connection.execute("DELETE FROM chats WHERE chat_id = ?", (old_chat_id,))
 
 

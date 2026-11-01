@@ -10,7 +10,9 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramConflictError
+from aiogram.types import BotCommand, BotCommandScopeAllGroupChats
 
+from pozor.auto_profiles import automatic_profile_loop
 from pozor.commands import expire_sessions
 from pozor.config import Settings
 from pozor.delivery import DeliveryPipeline, health_loop, recover_delivery
@@ -18,7 +20,6 @@ from pozor.inference_queue import InferenceQueue
 from pozor.ingestion import (
     PollingConflictError,
     run_poller,
-    sync_chat_allowlist,
 )
 from pozor.llm import Generator, LlamaClient
 from pozor.privacy import cleanup
@@ -53,15 +54,25 @@ async def run_telegram(settings: Settings) -> None:
         raise ValueError("BOT_TOKEN is not configured")
     database_path: Path = settings.database_path
     migrate(database_path)
-    sync_chat_allowlist(
-        database_path, settings.chat_allowlist, retention_days=settings.live_retention_days
-    )
     recover_delivery(database_path)
     async with Bot(token=bot_token.get_secret_value()) as bot, LlamaClient(settings) as client:
         identity = await bot.get_me()
+        await bot.set_my_commands(commands=[BotCommand(command=name, description=description)
+            for name, description in (
+                ("help", "Как пользоваться ботом"),
+                ("roast", "Прожарить: ответьте на сообщение или укажите @username"),
+                ("roast_on", "Разрешить участие и сбор своих сообщений"),
+                ("roast_off", "Выключить участие"),
+                ("stop", "Остановить прожарку"),
+                ("finish", "Завершить сессию"),
+                ("whois", "Участник: ответьте на его сообщение"),
+                ("forget_me", "Удалить мои данные в этой группе"),
+                ("enable_chat", "Включить чат (администратор)"),
+                ("disable_chat", "Выключить чат (администратор)"),
+            )], scope=BotCommandScopeAllGroupChats())
         source = AiogramUpdateSource(bot)
         pipeline = DeliveryPipeline(database_path, settings, bot, Generator(client),
-                                    InferenceQueue(client.wait_idle))
+                                    InferenceQueue(client.wait_idle, background_timeout=60))
 
         async def cleanup_loop() -> None:
             while True:
@@ -92,6 +103,9 @@ async def run_telegram(settings: Settings) -> None:
         tasks: tuple[asyncio.Task[None], ...] = (cleanup_task, session_clock_task, sender_task, health_task, poller_task)
         if settings.profile_cards_enabled:
             tasks += (asyncio.create_task(profile_loop(database_path, client, pipeline.queue)),)
+        if settings.semantic_profiles_enabled:
+            tasks += (asyncio.create_task(automatic_profile_loop(
+                database_path, settings, pipeline.queue)),)
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:

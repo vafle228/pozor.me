@@ -57,12 +57,44 @@ def test_parser_ignores_command_addressed_to_other_bot() -> None:
     assert parse_command("/roast@pozor_me_bot", bot_username="pozor_me_bot") is not None
 
 
+@pytest.mark.parametrize("text", ["@pozor_me_bot", "@pozor_me_bot попусти", "@pozor_me_bot прожарь", "@pozor_me_bot roast"])
+def test_bot_mention_can_target_reply(db_path, text):
+    parsed = parse_command(text, ({"type": "mention", "offset": 0, "length": 13},),
+                           bot_username="pozor_me_bot")
+    assert parsed is not None and parsed.name == "roast"
+    assert parsed.target_count == 0
+    assert resolve_target(db_path, CommandContext(-1001, 18, 1, 0, text, reply_user_id=17), parsed) == 17
+    assert parse_command(text, (), bot_username="pozor_me_bot") is None
+
+
+def test_bot_mention_with_username_target(db_path):
+    text = "@pozor_me_bot @new_name"
+    parsed = parse_command(text, ({"type": "mention", "offset": 0, "length": 13},
+                                  {"type": "mention", "offset": 14, "length": 9}),
+                           bot_username="pozor_me_bot")
+    assert parsed.username_targets == ("new_name",)
+    assert resolve_target(db_path, CommandContext(-1001, 18, 1, 0, text), parsed) == 17
+
+
+def test_session_cooldowns_expire_at_ten_seconds(db_path):
+    session = start_session(db_path, chat_id=-1001, thread_id=0, target_id=17,
+                            initiator_id=18, trigger_message_id=1, now=1000)
+    close_session(db_path, session_id=session, chat_id=-1001, thread_id=0, actor_id=18, now=1001)
+    with pytest.raises(Exception, match="осталось 1 с"):
+        start_session(db_path, chat_id=-1001, thread_id=0, target_id=17,
+                      initiator_id=18, trigger_message_id=2, now=1009)
+    assert start_session(db_path, chat_id=-1001, thread_id=0, target_id=17,
+                         initiator_id=18, trigger_message_id=3, now=1010)
+
+
 def test_text_mention_resolves_numeric_identity_without_username_guessing(db_path: Path) -> None:
+    from pozor.commands import roast_hint
     text = "/roast Макс"
-    parsed = parse_command(text, ({"type": "text_mention", "offset": 7, "length": 3,
+    parsed = parse_command(text, ({"type": "text_mention", "offset": 7, "length": 4,
                                   "user": {"id": 17}},))
     assert parsed is not None
     assert parsed.numeric_targets == (17,)
+    assert roast_hint(parsed) == ''
     assert resolve_target(db_path, CommandContext(-1001, 18, 1, 0, text), parsed) == 17
     assert resolve_target(db_path, CommandContext(-1001, 18, 1, 0, text), parsed,
                           bot_user_ids=frozenset({17})) is None
@@ -131,7 +163,7 @@ def test_opt_in_required_and_sessions_are_one_per_topic(db_path: Path) -> None:
     session = start_session(db_path, chat_id=-1001, thread_id=1, target_id=17,
                             initiator_id=18, trigger_message_id=2, now=2000)
     assert session
-    with pytest.raises(Exception, match="cooldown"):
+    with pytest.raises(Exception, match="осталось"):
         start_session(db_path, chat_id=-1001, thread_id=2, target_id=17,
                       initiator_id=19, trigger_message_id=3, now=2001)
     # A different target can start in another topic; scope exclusivity is per topic.
@@ -142,9 +174,21 @@ def test_opt_in_required_and_sessions_are_one_per_topic(db_path: Path) -> None:
     second = start_session(db_path, chat_id=-1001, thread_id=2, target_id=20,
                            initiator_id=19, trigger_message_id=4, now=2001)
     assert second != session
-    with pytest.raises(Exception, match="этой теме"):
+    with pytest.raises(Exception, match="осталось"):
         start_session(db_path, chat_id=-1001, thread_id=1, target_id=20,
                       initiator_id=19, trigger_message_id=5, now=2002)
+    with pytest.raises(Exception, match="нет материала"):
+        start_session(db_path, chat_id=-1001, thread_id=1, target_id=20,
+                      initiator_id=19, trigger_message_id=5, now=2012, material_available=False)
+    with connect(db_path) as connection:
+        assert connection.execute("SELECT state FROM sessions WHERE id=?", (session,)).fetchone()[0] == "active"
+    replacement = start_session(db_path, chat_id=-1001, thread_id=1, target_id=20,
+                                initiator_id=19, trigger_message_id=5, now=2012)
+    assert replacement not in (session, second)
+    with connect(db_path) as connection:
+        old = connection.execute("SELECT state,closed_reason,revision FROM sessions WHERE id=?", (session,)).fetchone()
+        assert tuple(old) == ("closed", "replaced", 2)
+        assert connection.execute("SELECT state FROM sessions WHERE id=?", (second,)).fetchone()[0] == "active"
 
 
 def test_stop_requires_actor_and_matching_thread(db_path: Path) -> None:
@@ -167,6 +211,7 @@ def test_incoming_state_machine_limits_scope_and_coalescing_window() -> None:
                            1000, 1010, 1)
     direct = IncomingEvent(-1001, 2, 17, True)
     assert decide_incoming(session, direct, 1030) == "continue"
+    assert decide_incoming(session, IncomingEvent(-1001, 2, 18, True), 1030) == "continue"
     assert decide_incoming(session, IncomingEvent(-1001, 2, 17, False), 1030) == "ignore"
     assert decide_incoming(session, IncomingEvent(-1001, 3, 17, True), 1030) == "ignore"
     assert decide_incoming(session, IncomingEvent(-1001, 2, 19, True), 1030) == "ignore"
@@ -312,7 +357,7 @@ def test_roast_command_returns_session_bound_stop_buttons(db_path: Path) -> None
 
     bot = FakeBot()
     update = {"message": {"message_id": 60, "chat": {"id": -1001, "type": "supergroup"},
-                           "from": {"id": 18, "first_name": "Инициатор"}, "text": "/roast @new_name",
+                           "from": {"id": 18, "first_name": "Инициатор"}, "text": "/roast @new_name турнир",
                            "entities": [{"type": "bot_command", "offset": 0, "length": 6},
                                         {"type": "mention", "offset": 7, "length": 9}]}}
     _run_immediate(handle_telegram_update(db_path, bot, update, owner_ids=frozenset(), bot_id=99))
