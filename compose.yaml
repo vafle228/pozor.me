@@ -18,7 +18,7 @@ services:
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
-  bot:
+  app:
     build: .
     restart: unless-stopped
     init: true
@@ -29,6 +29,10 @@ services:
       LLM_MODEL: pozor-local
       CONTEXT_SIZE: "8192"
       LOG_LEVEL: INFO
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: "8090"
+    ports:
+      - "127.0.0.1:8090:8090"
     volumes:
       - ./data:/data
     depends_on:

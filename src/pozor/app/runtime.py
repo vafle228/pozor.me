@@ -7,7 +7,7 @@ from pozor.config import Settings
 
 
 async def serve(settings: Settings, *, admin_only: bool = False) -> None:
-    from pozor.runtime import run_telegram
+    from pozor.app.telegram_runtime import run_telegram
 
     async with Container(settings) as container:
         await container.start_admin()

@@ -46,7 +46,7 @@ def messages_for(pack: ContextPack, retry: str | None = None, *,
             'conversation': [t for t in pack.conversation if t.role == 'user'],
         })
     messages = [{"role": "system", "content": system},
-                {"role": "user", "content": prompt_pack.model_dump_json(exclude_defaults=True)}]
+                {"role": "user", "content": prompt_pack.model_dump_json(exclude_defaults=True, exclude={'repetition_texts'})}]
     if retry in {'echo', 'repetition'}:
         problem = 'копирует исходную реплику' if retry == 'echo' else 'повторяет уже сказанное'
         messages.append({"role": "user", "content": (

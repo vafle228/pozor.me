@@ -8,8 +8,8 @@ from typing import Any
 from pozor.config import Settings
 from pozor.core.domain.context import ContextPack, ConversationTurn
 from pozor.core.domain.generation import GenerationResult
+from pozor.infra.sqlite.connection import connect
 from pozor.infra.sqlite.retrieval import sources_current
-from pozor.storage import connect
 
 
 class GenerationRepository:
@@ -34,7 +34,7 @@ class GenerationRepository:
             values = (pack.chat_id, pack.target_id, session_id, turn_no, pack.mode,
                 result.prompt_version, '0.2.0', version, settings.llm_model,
                 json.dumps({k: getattr(settings, k) for k in ('temperature','top_p','min_p','presence_penalty','max_output_tokens')}),
-                pack.model_dump_json(), json.dumps(result.candidates, ensure_ascii=False),
+                pack.model_dump_json(exclude={'repetition_texts'}), json.dumps(result.candidates, ensure_ascii=False),
                 result.roast.model_dump_json(), result.judge_reason, result.latency_ms,
                 result.reason, time.time())
             db.execute('''INSERT INTO generations(chat_id,target_id,session_id,turn_no,mode,prompt_version,
@@ -59,7 +59,7 @@ class GenerationRepository:
                 r.generation_id=g.id AND r.rating=1) AS positive FROM generations g
                 JOIN turns t ON t.session_id=g.session_id AND t.turn_no=g.turn_no
                 WHERE g.chat_id=? AND g.mode='roast' AND g.created_at>? AND t.status='sent'
-                ORDER BY g.created_at DESC LIMIT 100''', (chat, now-7*86400)).fetchall()
+                ORDER BY g.created_at DESC''', (chat, now-7*86400)).fetchall()
             own = 0
             for row in rows:
                 request = json.loads(row['request_json'])
@@ -69,8 +69,7 @@ class GenerationRepository:
                     continue
                 if selected['angle'] != 'fallback' and len(angles) < 8:
                     angles.append(selected['angle'])
-                if len(answers) < 40:
-                    answers.append(selected['text'])
+                answers.append(selected['text'])
                 if row['target_id'] == target and own < 10:
                     own += 1
                     sources.update(h['source_id'] for h in request.get('hooks', []))
@@ -103,11 +102,14 @@ class GenerationRepository:
 
     def metrics(self) -> dict[str, Any]:
         with connect(self.database) as db:
-            rows = db.execute('SELECT latency_ms,fallback_reason FROM generations').fetchall()
+            rows = db.execute('SELECT latency_ms,fallback_reason,selected_json FROM generations').fetchall()
             ratings = db.execute('SELECT rating,count(*) AS count FROM joke_ratings GROUP BY rating').fetchall()
         times = sorted(r['latency_ms'] for r in rows)
+        angles=[json.loads(r['selected_json'])['angle'] for r in rows if r['fallback_reason'] is None]
         def percentile(p: float) -> float:
             return times[min(len(times)-1, int((len(times)-1)*p))] if times else 0
         return {'generations': len(rows), 'fallback_rate': sum(r['fallback_reason'] is not None for r in rows)/max(1,len(rows)),
+                'repeat_angle_rate':(len(angles)-len(set(angles)))/max(1,len(angles)),
+                'angle_diversity':len(set(angles))/max(1,len(angles)),
                 'p50_ms': percentile(.5), 'p95_ms': percentile(.95),
                 'ratings': {str(r['rating']): r['count'] for r in ratings}}

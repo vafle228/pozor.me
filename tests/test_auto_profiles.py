@@ -49,6 +49,8 @@ def model(monkeypatch):
             return httpx.Response(200, json={'prompt': 'rendered'})
         if request.url.path == '/tokenize':
             return httpx.Response(200, json={'tokens': [1] * 100})
+        if 'hooks' in json.loads(request.content)['response_format']['schema'].get('properties',{}):
+            return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':'{"hooks":[]}'}}]})
         rows = json.loads(json.loads(request.content)['messages'][1]['content'])
         if json.loads(request.content)['response_format']['schema'].get('title') == 'Dossier':
             return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {
@@ -61,6 +63,8 @@ def model(monkeypatch):
 
     monkeypatch.setattr(semantic_profiles, 'LlamaClient', lambda settings: LlamaClient(
         settings, transport=httpx.MockTransport(respond)))
+    from pozor.infra.sqlite import hook_repo
+    monkeypatch.setattr(hook_repo,'LlamaClient',lambda settings:LlamaClient(settings,transport=httpx.MockTransport(respond)))
     return calls
 
 
@@ -173,9 +177,9 @@ async def test_empty_result_is_explicit_and_does_not_loop(database, monkeypatch)
 
     monkeypatch.setattr(semantic_profiles, 'analyze', empty)
     queue = InferenceQueue(idle)
-    assert await refresh(database, Settings(), queue, -1, 42)
+    assert await refresh(database, Settings(humor_v2_enabled=False), queue, -1, 42)
     release(database)
-    assert not await refresh(database, Settings(), queue, -1, 42)
+    assert not await refresh(database, Settings(humor_v2_enabled=False), queue, -1, 42)
     with connect(database) as db:
         assert db.execute('SELECT state FROM automatic_profiles').fetchone()[0] == 'empty'
     await queue.aclose()

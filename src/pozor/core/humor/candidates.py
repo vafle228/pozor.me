@@ -53,7 +53,7 @@ class Candidate(Contract):
 
 
 class Candidates(Contract):
-    candidates: list[Candidate] = Field(min_length=1, max_length=5)
+    candidates: list[Candidate] = Field(min_length=5, max_length=5)
 
 
 class Judgement(Contract):
@@ -61,6 +61,12 @@ class Judgement(Contract):
     reject: list[int]
     risk: list[int] = Field(default_factory=list)
     reason: str = Field(max_length=200)
+
+
+class CandidateFailure(InferenceError):
+    def __init__(self, reason: str, candidates: list[dict[str,str]]):
+        super().__init__(reason)
+        self.candidates=candidates
 
 
 def material(pack: ContextPack) -> dict[str, object]:
@@ -77,8 +83,7 @@ def candidate_messages(pack: ContextPack, mechanisms: list[str], system: str = S
     messages = [{"role": "system", "content": system}]
     for trigger, answer in EXAMPLES:
         messages += [{"role": "user", "content": json.dumps({"trigger": trigger}, ensure_ascii=False)},
-                     {"role": "assistant", "content": json.dumps({"candidates": [
-                         {"mechanism": "конкретное сравнение", "angle": "деталь с поворотом", "text": answer}]}, ensure_ascii=False)}]
+                     {"role": "assistant", "content": answer}]
     messages.extend({"role": t.role, "content": t.text} for t in pack.few_shot)
     messages.append({"role": "user", "content": json.dumps(material(pack) | {'mechanisms': mechanisms}, ensure_ascii=False)})
     return messages
@@ -106,6 +111,7 @@ async def generate_candidates(model: ModelPort, pack: ContextPack, deadline: flo
     mechanisms = rng.sample(MECHANISMS, 5) if rng else MECHANISMS[:5]
     all_candidates: list[dict[str, str]] = []
     eligible: list[GeneratedRoast] = []
+    unsafe_texts: set[str] = set()
     reason = 'no_valid_candidates'
     token_count = 0
     for attempt in range(2):
@@ -113,7 +119,9 @@ async def generate_candidates(model: ModelPort, pack: ContextPack, deadline: flo
         token_count = await model.count(messages, deadline)
         if token_count + model.settings.max_output_tokens + model.settings.token_reserve > model.settings.context_size:
             raise InferenceError('context_overflow')
-        raw = await model.complete_json(messages, deadline, schema=Candidates.model_json_schema())
+        schema=Candidates.model_json_schema()
+        schema['$defs']['Candidate']['properties']['mechanism']['enum']=mechanisms
+        raw = await model.complete_json(messages, deadline, schema=schema)
         try:
             batch = Candidates.model_validate_json(raw).candidates
         except ValidationError:
@@ -150,7 +158,9 @@ async def generate_candidates(model: ModelPort, pack: ContextPack, deadline: flo
         except (ValidationError, ValueError):
             reason = 'judge_schema'
             continue
+        unsafe_texts.update(roast.text for i,(_,roast) in enumerate(valid) if i in verdict.risk)
         eligible.extend(roast for i, (_, roast) in enumerate(valid) if i not in verdict.risk)
+        eligible=[roast for roast in eligible if roast.text not in unsafe_texts]
         reason = verdict.reason
         if verdict.best is not None and verdict.best not in {*verdict.reject, *verdict.risk}:
             selected = valid[verdict.best][1]
@@ -160,7 +170,10 @@ async def generate_candidates(model: ModelPort, pack: ContextPack, deadline: flo
             break
         mechanisms = mechanisms[1:] + [MECHANISMS[(5 + attempt) % len(MECHANISMS)]]
     else:
-        raise InferenceError(reason if reason in {'candidate_schema', 'judge_schema', 'no_valid_candidates'} else 'all_rejected')
+        if eligible:
+            selected=eligible[0]
+        else:
+            raise CandidateFailure(reason if reason in {'candidate_schema', 'judge_schema', 'no_valid_candidates'} else 'all_rejected',all_candidates)
     return GenerationResult(roast=selected, fallback=False, token_count=token_count,
         context_hash=digest, candidates=all_candidates, judge_reason=reason, prompt_version='v2',
         latency_ms=(asyncio.get_running_loop().time()-started)*1000)

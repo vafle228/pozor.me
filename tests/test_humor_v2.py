@@ -23,7 +23,13 @@ class FakeModel:
 
     async def complete_json(self, messages, deadline, **kwargs):
         self.calls.append((messages, kwargs))
-        return json.dumps(next(self.answers), ensure_ascii=False)
+        answer=next(self.answers)
+        if answer.get('candidates'):
+            answer=dict(answer)
+            answer['candidates']=[*answer['candidates']]
+            while len(answer['candidates'])<5:
+                answer['candidates'].append(answer['candidates'][0])
+        return json.dumps(answer, ensure_ascii=False)
 
     async def complete(self, messages, deadline):
         raise AssertionError('V2 uses distinct schemas for drafts and judge')
@@ -48,7 +54,7 @@ async def test_editor_selects_concrete_punch_and_code_addresses_target():
     result = await Generator(model).generate(context(), asyncio.get_running_loop().time()+2)
     assert not result.fallback
     assert result.roast.text == 'Алиса, Твой будильник уже подал заявление на отпуск.'
-    assert len(result.candidates) == 2 and result.prompt_version == 'v2'
+    assert len(result.candidates) == 5 and result.prompt_version == 'v2'
     assert model.calls[1][1]['temperature'] == 0
 
 

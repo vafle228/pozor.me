@@ -61,6 +61,7 @@ def select_export(
     approved_aliases: Sequence[Alias] = (),
     selected_ids: set[int] | None = None,
     neighbors: int = 0,
+    excluded_author_ids: frozenset[int] = frozenset(),
 ) -> list[ImportRow]:
     """Select evidence from ONE source chat, already selected by its adapter.
 
@@ -74,6 +75,8 @@ def select_export(
     indexed: dict[int, tuple[Mapping[str, object], int, str]] = {}
     for message in messages:
         if message.get("type") != "message":
+            continue
+        if message.get('is_bot') is True or user_id(message.get('from_id')) in excluded_author_ids:
             continue
         mid = message.get("id")
         if type(mid) is not int or mid <= 0:
@@ -144,6 +147,9 @@ def select_export(
         for anchor in list(relations):
             index = positions[anchor]
             message, timestamp, _ = indexed[anchor]
+            nearby_parent = message.get('reply_to_message_id')
+            if type(nearby_parent) is int and nearby_parent in indexed and eligible(nearby_parent):
+                relations.setdefault(nearby_parent,'context')
             for near in ordered[max(0, index - 1) : index + 2]:
                 other, other_time, _ = indexed[near]
                 if (

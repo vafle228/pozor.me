@@ -4,8 +4,8 @@ import asyncio
 from pathlib import Path
 
 from pozor.core.domain.context import ContextPack
+from pozor.infra.sqlite.connection import connect
 from pozor.infra.sqlite.retrieval import retrieve, sources_current
-from pozor.storage import connect
 
 
 class SQLiteMessageStore:

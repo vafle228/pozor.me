@@ -1,19 +1,21 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
+let csrfToken = "";
 const state = {chats: [], page: "profiles", offset: 0, total: 0, request: 0};
 const names = {self_quote: "Своя цитата", self_pattern: "Повторяющаяся реплика", imported_quote: "Цитата из импорта", third_party_joke: "Слова другого участника"};
 const dates = value => value ? new Date(value).toLocaleString("ru-RU") : "Пока нет";
 function node(tag, text, cls) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
 async function api(path, options) {
-  const response = await fetch(path, {cache: "no-store", ...options});
+  const response = await fetch(path, {cache: "no-store", ...options, headers: {...options?.headers, ...(csrfToken ? {"X-CSRF-Token": csrfToken} : {})}});
   if (response.status === 401) { lock(); throw new Error("Войдите в пульт: сессия завершилась или пароль неверен."); }
   if (!response.ok) { const detail = await response.json().catch(() => ({})); throw new Error(detail.error && !["database_unavailable", "not_found", "invalid_query"].includes(detail.error) ? detail.error : response.status === 503 ? "База недоступна или её схема устарела. Проверьте путь и миграции бота." : "Не удалось загрузить данные. Попробуйте обновить страницу."); }
-  return response.json();
+  const result = await response.json(); if (result.csrf_token) csrfToken = result.csrf_token; return result;
 }
-function lock() { state.request++; if (typeof resetTelegram === "function") resetTelegram(); $("dashboard").hidden = true; $("login").hidden = false; $("profiles").replaceChildren(); $("chats").replaceChildren(); $("prompt").textContent = ""; $("members").replaceChildren(); $("members-status").textContent = ""; }
+function lock() { csrfToken = ""; state.request++; if (typeof resetTelegram === "function") resetTelegram(); $("dashboard").hidden = true; $("login").hidden = false; $("profiles").replaceChildren(); $("chats").replaceChildren(); $("prompt").textContent = ""; $("members").replaceChildren(); $("members-status").textContent = ""; }
 function failure(error) { $("error").textContent = error.message; $("error").hidden = false; }
 function empty(title, description) { const el = node("div", undefined, "empty"); el.append(node("h2", title), node("div", description)); return el; }
 async function boot() {
+  await api("/api/session");
   const result = await api("/api/chats"); state.chats = result.chats;
   $("dashboard").hidden = false; $("login").hidden = true; $("error").hidden = true;
   $("stats").replaceChildren(...[
@@ -54,6 +56,15 @@ async function profiles() {
     head.append(node("div", name.slice(0, 2).toUpperCase(), "avatar"), info);
     heading.append(head, node("p", `${member.cards.length} наблюдений · Открыть профиль и цитаты ▾`, "meta")); el.append(heading);
     el.append(node("p", `Чат ${member.chat_id} · был(а) ${dates(member.last_seen)}`));
+    const hooks = member.cards.filter(card => card.kind === "hook");
+    if (hooks.length) el.append(node("h3", "Зацепки для прожарки"));
+    for (const hook of hooks) {
+      const panel = node("div", undefined, "card");
+      panel.append(node("blockquote", hook.quote), node("p", hook.why_funny), node("p", `Уровень ${hook.heat}`, "meta"));
+      const exclude = node("button", hook.excluded ? "Исключена" : "Исключить", "ghost"); exclude.disabled = !!hook.excluded;
+      exclude.onclick = async () => { try { await api("/api/hooks/exclude", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:hook.id})}); exclude.disabled = true; exclude.textContent = "Исключена"; } catch(error) { failure(error); } };
+      panel.append(exclude); el.append(panel);
+    }
     const quotes = node("div"); let loaded = false;
     el.ontoggle = async () => {
       if (!el.open || loaded) return;
@@ -134,12 +145,14 @@ async function page(name) {
   if (typeof stopTelegram === "function") stopTelegram();
   state.page = name; state.request++; $("error").hidden = true;
   const titles = {profiles: ["ПОРТРЕТЫ", "АРХИВ НАБЛЮДЕНИЙ", "Люди в контексте.", "У каждого чата — свой портрет. У каждой цитаты — свой источник."], chats: ["ЧАТЫ", "ТЕРРИТОРИЯ БОТА", "Места встречи.", "Известные боту группы и настройки сбора данных."], prompt: ["ПРОМПТ", "РЕЖИССУРА ПРОЖАРКИ", "Слова перед словами.", "Инструкция, которая задаёт тон, формат и границы каждой шутки."]};
+  titles.settings = ["НАСТРОЙКИ", "ПАРАМЕТРЫ БОТА", "Тон и ритм.", "Изменения runtime применяются к следующему запросу. Источник каждого значения виден рядом."];
   titles.members = ["УЧАСТНИКИ", "УПРАВЛЕНИЕ ROAST", "Кто участвует.", "Включайте и выключайте roast для участников выбранного чата."];
   titles.history = ["ИСТОРИЯ", "ПОДКЛЮЧЕНИЕ TELEGRAM", "Прошлое в контексте.", "Выберите группу и участников — историю загрузим сами."];
   ["breadcrumb", "eyebrow", "title", "subtitle"].forEach((id, i) => $(id).textContent = titles[name][i]);
-  ["profiles", "chats", "prompt", "history", "members"].forEach(p => $(p + "-page").hidden = p !== name);
+  ["profiles", "chats", "prompt", "history", "members", "settings"].forEach(p => $(p + "-page").hidden = p !== name);
   document.querySelectorAll("[data-page]").forEach(button => button.classList.toggle("active", button.dataset.page === name));
   if (name === "profiles") await profiles();
+  if (name === "settings") await loadSettings();
   if (name === "members") await members();
   if (name === "history") await loadTelegram();
   if (name === "prompt") { const request = state.request; const prompt = await api("/api/prompt"); if (request !== state.request) return; $("prompt").textContent = prompt.system; $("prompt-hash").textContent = prompt.sha256; $("prompt-source").textContent = prompt.source; }
@@ -156,3 +169,32 @@ $("refresh").onclick = () => { state.offset = 0; boot().catch(failure); };
 $("logout").onclick = async () => { try { await api("/api/logout", {method: "POST"}); lock(); } catch (error) { failure(error); } };
 $("copy").onclick = async () => { try { await navigator.clipboard.writeText($("prompt").textContent); $("copy").textContent = "Скопировано ✓"; setTimeout(() => $("copy").textContent = "Копировать", 1800); } catch { failure(new Error("Не удалось скопировать. Выделите текст промпта вручную.")); } };
 boot().catch(error => { if (!$("login").hidden) { if (!error.message.startsWith("Войдите")) $("login-error").textContent = error.message; } else failure(error); });
+
+async function loadSettings() {
+  const data = await api("/api/settings");
+  const target = $("settings-list"); target.replaceChildren();
+  for (const setting of data.settings) {
+    const row = node("form", undefined, "pipeline-panel"), label = node("label", setting.name);
+    const input = node("input"); input.setAttribute("aria-label", setting.name);
+    const value = setting.value;
+    input.type = typeof value === "boolean" ? "checkbox" : typeof value === "number" ? "number" : "text";
+    input.step = "any";
+    if (input.type === "checkbox") input.checked = value;
+    else input.value = typeof value === "object" ? JSON.stringify(value) : value;
+    input.disabled = setting.owner !== "runtime";
+    row.append(label, input, node("p", `${setting.description} · источник: ${setting.source}${setting.restart_required ? " · после перезапуска" : ""}`, "note"));
+    if (setting.owner === "runtime") {
+      const save = node("button", "Сохранить"); row.append(save);
+      const reset = node("button", "Сбросить переопределение", "ghost"); reset.type = "button";
+      reset.onclick = async () => { try { await api("/api/settings", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:setting.name,reset:true})}); await loadSettings(); } catch(error) { failure(error); } }; row.append(reset);
+      row.onsubmit = async event => { event.preventDefault(); try {
+        let edited = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
+        if (Array.isArray(value)) edited = JSON.parse(input.value);
+        await api("/api/settings", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:setting.name,value:edited})}); await loadSettings();
+      } catch(error) { failure(error); } };
+    }
+    target.append(row);
+  }
+  const metrics = await api("/api/metrics");
+  $("generation-metrics").textContent = `Генераций: ${metrics.generations} · fallback: ${Math.round(metrics.fallback_rate*100)}% · p50: ${Math.round(metrics.p50_ms)} мс · p95: ${Math.round(metrics.p95_ms)} мс`;
+}

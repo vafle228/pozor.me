@@ -40,6 +40,7 @@ def test_doctor_checks_local_prerequisites_and_never_prints_credentials() -> Non
         settings = Settings(
             _env_file=None,
             bot_token=SecretStr(token),
+            admin_password="synthetic-admin-password",
             database_path=tmp_path / "nested" / "pozor.sqlite3",
         )
 

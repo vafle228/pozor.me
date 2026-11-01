@@ -8,11 +8,11 @@ from pozor.config import Settings
 from pozor.core.domain.context import Hook
 from pozor.core.humor.hooks import extract
 from pozor.core.humor.material import normalize
-from pozor.inference_queue import InferenceQueue
 from pozor.infra.llm.client import LlamaClient
+from pozor.infra.llm.queue import InferenceQueue
+from pozor.infra.sqlite.connection import connect
+from pozor.infra.sqlite.profile_repo import snapshot
 from pozor.infra.sqlite.retrieval import sources_current
-from pozor.semantic_profiles import snapshot
-from pozor.storage import connect
 
 
 def select_hooks(database: Path, chat: int, target: int, trigger: str, level: int,

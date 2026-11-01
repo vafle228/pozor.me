@@ -59,6 +59,7 @@ def validate_output(raw: str, pack: ContextPack) -> GeneratedRoast:
         raise InvalidOutput("empty")
     allowed = {e.evidence_id for e in [pack.trigger, *pack.recent, *pack.evidence]}
     allowed.update(eid for memory in pack.dossier for eid in memory.evidence_ids)
+    allowed.update(f'message:{hook.source_id}' for hook in pack.hooks)
     if (not roast.evidence_ids or len(set(roast.evidence_ids)) != len(roast.evidence_ids)
             or not set(roast.evidence_ids) <= allowed):
         raise InvalidOutput("evidence_ids")
@@ -87,6 +88,7 @@ def validate_output(raw: str, pack: ContextPack) -> GeneratedRoast:
                 raise InvalidOutput('echo')
     previous = [re.sub(r'^Бот:\s*', '', t) for t in pack.session_turns]
     previous += [t.text for t in pack.conversation if t.role == 'assistant']
+    previous += pack.repetition_texts
     address = re.compile(r'^' + re.escape(pack.target_label) + r'\s*[,::—-]\s*', re.IGNORECASE)
     for old in previous:
         a = normalize(address.sub('', roast.text)).split()

@@ -16,14 +16,18 @@ from typing import Any
 
 from aiohttp import web
 
-from pozor.admin_pipeline import AdminPipeline
-from pozor.commands import set_consent
 from pozor.config import Settings
 from pozor.infra.config.service import SettingsService
 from pozor.infra.files.prompts import FilePromptStore
+from pozor.infra.sqlite import health_repo
+from pozor.infra.sqlite.admin_pipeline import AdminPipeline
 from pozor.infra.sqlite.admin_repo import AdminData
+from pozor.infra.sqlite.commands import set_consent
 from pozor.infra.sqlite.generation_repo import GenerationRepository
-from pozor.telegram_account import AccountError
+from pozor.infra.telegram_account import AccountError
+
+PASSWORD_KEY=web.RequestKey('active_password',str)
+SIGNING_KEY=web.RequestKey('active_key',bytes)
 
 STATIC = Path(__file__).resolve().parents[2] / 'admin_static'
 
@@ -40,7 +44,7 @@ def create_app(data: AdminData, password: str, *, settings: Settings | None = No
     def session(request: web.Request) -> str | None:
         try:
             stamp, nonce, signature = request.cookies['pozor_admin'].split('.')
-            expected = hmac.new(signing_key, f'{stamp}.{nonce}'.encode(), 'sha256').hexdigest()
+            expected = hmac.new(request.get(SIGNING_KEY,signing_key), f'{stamp}.{nonce}'.encode(), 'sha256').hexdigest()
             if 0 <= time.time()-int(stamp) < 28800 and hmac.compare_digest(signature, expected):
                 return nonce
         except (KeyError, ValueError):
@@ -50,6 +54,9 @@ def create_app(data: AdminData, password: str, *, settings: Settings | None = No
     @web.middleware
     async def security(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> web.StreamResponse:
         try:
+            active_password=await asyncio.to_thread(service.admin_password) if service else password
+            request[PASSWORD_KEY]=active_password or ''
+            request[SIGNING_KEY]=hmac.new(signing_key,(active_password or '').encode(),'sha256').digest()
             if request.method == 'POST':
                 origin = request.headers.get('Origin')
                 scheme = 'https' if settings.admin_secure_cookie else 'http'
@@ -86,23 +93,25 @@ def create_app(data: AdminData, password: str, *, settings: Settings | None = No
         return result
 
     async def login(request: web.Request) -> web.Response:
+        current=await asyncio.to_thread(service.snapshot) if service else settings
         peer = request.remote or 'local'
         window = failures[peer]
         now = time.monotonic()
-        while window and window[0] < now-settings.admin_login_window_seconds:
+        while window and window[0] < now-current.admin_login_window_seconds:
             window.popleft()
-        if len(window) >= settings.admin_login_attempts:
+        if len(window) >= current.admin_login_attempts:
             return web.json_response({'error':'too_many_attempts'}, status=429,
-                                     headers={'Retry-After':str(settings.admin_login_window_seconds)})
+                                     headers={'Retry-After':str(current.admin_login_window_seconds)})
         supplied = (await body(request)).get('password')
         if not isinstance(supplied, str):
             raise TypeError
-        if not hmac.compare_digest(supplied.encode(), password.encode()):
+        active_password=request[PASSWORD_KEY]
+        if not active_password or not hmac.compare_digest(supplied.encode(), active_password.encode()):
             window.append(now)
             return web.json_response({'error':'invalid_password'}, status=401)
         window.clear()
         nonce, stamp = secrets.token_hex(24), str(int(time.time()))
-        signature = hmac.new(signing_key, f'{stamp}.{nonce}'.encode(), 'sha256').hexdigest()
+        signature = hmac.new(request[SIGNING_KEY], f'{stamp}.{nonce}'.encode(), 'sha256').hexdigest()
         response = web.json_response({'csrf_token':nonce})
         response.set_cookie('pozor_admin', f'{stamp}.{nonce}.{signature}', httponly=True,
             secure=settings.admin_secure_cookie, samesite='Strict', max_age=28800)
@@ -156,6 +165,16 @@ def create_app(data: AdminData, password: str, *, settings: Settings | None = No
             else:
                 await asyncio.to_thread(service.set, payload['name'], payload['value'], actor='admin')
             return web.json_response({})
+        if request.path == '/api/hooks/exclude':
+            if type(payload.get('id')) is not int:
+                raise ValueError
+            await asyncio.to_thread(health_repo.exclude_hook,data.database,payload['id'])
+            return web.json_response({})
+        if request.path == '/api/chats/level':
+            if type(payload.get('chat')) is not int or type(payload.get('level')) is not int:
+                raise ValueError
+            await asyncio.to_thread(health_repo.chat_level,data.database,payload['chat'],payload['level'])
+            return web.json_response({})
         if request.path == '/api/members/roast':
             if (type(payload.get('chat')) is not int or type(payload.get('user')) is not int
                     or type(payload.get('enabled')) is not bool or not -(2**63) <= payload['chat'] < 2**63
@@ -179,12 +198,9 @@ def create_app(data: AdminData, password: str, *, settings: Settings | None = No
         if health:
             result = await health()
         else:
-            def database_health() -> dict[str, Any]:
-                with sqlite3.connect(data.database.as_uri()+'?mode=ro',uri=True) as db:
-                    version = db.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]
-                return {'ok':True,'database':'ok','schema_version':version,'mode':'admin'}
             try:
-                result = await asyncio.to_thread(database_health)
+                version = await asyncio.to_thread(health_repo.schema,data.database)
+                result={'ok':True,'database':'ok','schema_version':version,'mode':'admin'}
             except sqlite3.Error:
                 result = {'ok':False,'database':'unavailable'}
         return web.json_response(result,status=200 if result.get('ok') else 503)

@@ -10,7 +10,12 @@ from pozor.core.domain.generation import (
     InvalidOutput,
 )
 from pozor.core.humor.budget import pack_context
-from pozor.core.humor.candidates import MECHANISMS, candidate_messages, generate_candidates
+from pozor.core.humor.candidates import (
+    MECHANISMS,
+    CandidateFailure,
+    candidate_messages,
+    generate_candidates,
+)
 from pozor.core.humor.output import address_roast, validate_output
 from pozor.core.humor.prompts import messages_for
 from pozor.core.ports import ModelPort, PromptStore, Rng
@@ -18,6 +23,8 @@ from pozor.core.ports import ModelPort, PromptStore, Rng
 logger = logging.getLogger(__name__)
 FALLBACK = "Твой панч пока на прогреве. Даже микроволновка справилась бы быстрее."
 DIALOGUE_FALLBACK = "Задумался. Дай ещё одну реплику."
+FALLBACKS = (FALLBACK, 'Твой панч ушёл за хлебом. Судя по темпу, тоже с семью будильниками.',
+             'Даже шутка взяла паузу, чтобы осмыслить этот заход.')
 
 class Generator:
     def __init__(self, client: ModelPort, rng: Rng | None = None, prompts: PromptStore | None = None):
@@ -72,10 +79,14 @@ class Generator:
                 self.failures += 1
                 if self.failures >= 3:
                     self.open_until = asyncio.get_running_loop().time() + 30
+            fallback=GeneratedRoast(text=DIALOGUE_FALLBACK if pack.mode == 'dialogue' else
+                FALLBACKS[int(hashlib.sha256(pack.trigger.text.encode()).hexdigest(),16)%len(FALLBACKS)]
+                if self.client.settings.humor_v2_enabled else FALLBACK,evidence_ids=[],angle='fallback')
             return GenerationResult(
-                roast=GeneratedRoast(text=DIALOGUE_FALLBACK if pack.mode == "dialogue" else FALLBACK,
-                                     evidence_ids=[], angle="fallback"),
+                roast=address_roast(fallback,pack) if self.client.settings.humor_v2_enabled else fallback,
                 fallback=True, reason=reason,
+                candidates=exc.candidates if isinstance(exc,CandidateFailure) else [],
+                prompt_version='v2' if self.client.settings.humor_v2_enabled else 'v1',
             )
         raise AssertionError("unreachable")
 

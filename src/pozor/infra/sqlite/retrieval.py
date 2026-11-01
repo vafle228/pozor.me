@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pozor.core.domain.context import ContextPack, Evidence, ProfileMemory
 from pozor.core.humor.material import fuse, lexical_relevant, match_query, normalize
-from pozor.storage import connect
+from pozor.infra.sqlite.connection import connect
 
 
 def sources_current(db: sqlite3.Connection, chat: int, target: int,
@@ -89,8 +89,9 @@ def retrieve(
         concepts = [{term, {"reddit": "реддит", "реддит": "reddit", "game": "игра", "игра": "game"}.get(term, term)}
                     for term in query_terms]
         concepts = [set(group) for group in {tuple(sorted(group)) for group in concepts}]
+        required = 1 if (len(concepts)==1 and len(lexical)==1 and any(len(t)>=5 for t in concepts[0])) else min_terms
         lexical = [eid for eid in lexical if lexical_relevant(rows_by_id[eid].text, concepts,
-                    minimum=min_terms)]
+                    minimum=required)]
         recent_self = collect(columns + scope +
             " AND s.relation='self' ORDER BY m.occurred_at DESC,m.id DESC LIMIT 40", params)
         mentions = collect(columns + scope +
