@@ -466,7 +466,7 @@ def test_provenance_migration_repairs_exports_only_and_invalidates_once(tmp_path
                 "INSERT INTO message_subjects VALUES (?,42,'self','observed_self')", (mid,)
             )
         connection.execute("INSERT INTO data_epochs VALUES (-1001,42,5)")
-    assert migrate(database) == ["0005_import_provenance.sql", "0006_retrieval.sql", "0007_delivery.sql", "0008_profiles_privacy.sql", "0009_admin_chats.sql", "0010_automatic_profiles.sql", "0011_session_mode.sql", "0012_conversation_diagnostics.sql"]
+    assert migrate(database) == [f.name for f in sorted(MIGRATIONS_DIR.glob('*.sql')) if f.name >= '0005']
     with connect(database) as connection:
         assert [r[0] for r in connection.execute(
             "SELECT attribution FROM message_subjects ORDER BY message_id"

@@ -75,7 +75,7 @@ def scope(tmp_path):
         db.execute("INSERT INTO chats(chat_id,allowed,enabled) VALUES (-1001,1,1)")
         db.execute("INSERT INTO members(chat_id,user_id,consent) VALUES (-1001,42,1),(-1001,43,1)")
     clock, bot, generator = Clock(), Bot(), FakeGenerator()
-    pipeline = DeliveryPipeline(database, Settings(_env_file=None), bot, generator,
+    pipeline = DeliveryPipeline(database, Settings(_env_file=None, humor_v2_enabled=False), bot, generator,
                                 InferenceQueue(idle), clock=clock)
     pipeline.ready = True
     return pipeline, database, clock, bot, generator
@@ -168,7 +168,7 @@ async def test_stale_results_never_send(scope, tmp_path, cause, stage):
     if stage == "inference":
         generator.release.clear()
     sid = start(scope)
-    await generator.entered.wait()
+    await asyncio.wait_for(generator.entered.wait(),2)
     if stage == "outbox":
         await generated(p)
     if cause == "stop":
@@ -178,7 +178,7 @@ async def test_stale_results_never_send(scope, tmp_path, cause, stage):
     elif cause == "rollback":
         rollback_import(db, batch)
     elif cause == "deadline":
-        clock.now += 9
+        clock.now += 31
     else:
         with connect(db) as con:
             if cause == "disable":
@@ -320,7 +320,7 @@ async def test_new_reply_during_inference_replaces_revision(scope):
     generator.release.clear()
     clock.now += 11
     assert p.accept(sid, 2, "второй", first=True)
-    await generator.entered.wait()
+    await asyncio.wait_for(generator.entered.wait(),2)
     assert p.accept(sid, 3, "третий", first=True)
     generator.release.set()
     await generated(p)
@@ -432,7 +432,7 @@ async def test_unavailable_health_and_stale_commands_do_not_start(scope):
 
 @pytest.mark.asyncio
 async def test_polling_commands_import_and_stop_while_gpu_busy(scope, tmp_path, monkeypatch):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
 
     p, db, clock, bot, generator = scope
     monkeypatch.setattr(commands, "utc_now", lambda: int(clock()))
@@ -450,7 +450,7 @@ async def test_polling_commands_import_and_stop_while_gpu_busy(scope, tmp_path, 
         await p.handle_update(payload, bot_id=99, bot_username="pozor_me_bot", owner_ids=frozenset())
 
     await poll_once(Source(), db, 99, control_handler=handler)
-    await generator.entered.wait()
+    await asyncio.wait_for(generator.entered.wait(),2)
     assert generator.packs[0].evidence[0].attribution == "imported_quote"
     assert state(db, "inbox")[0]["normalized_payload"] == ""
     sid = state(db, "sessions")[0]["id"]
@@ -468,7 +468,7 @@ async def test_polling_commands_import_and_stop_while_gpu_busy(scope, tmp_path, 
 @pytest.mark.parametrize('argument,expected', [('', 'Дружеская прожарка участника.'),
                                                ('игра', 'игра'), ('@known_user игра', 'Участник игра')])
 async def test_roast_routing_suffix_is_not_model_evidence(scope, monkeypatch, argument, expected):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
 
     pipeline, database, clock, _bot, generator = scope
     monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
@@ -492,7 +492,7 @@ async def test_roast_routing_suffix_is_not_model_evidence(scope, monkeypatch, ar
 
 
 async def test_empty_roast_refuses_session_without_charging_cooldown(scope, monkeypatch):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
 
     pipeline, database, clock, bot, generator = scope
     monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
@@ -509,7 +509,7 @@ async def test_empty_roast_refuses_session_without_charging_cooldown(scope, monk
 
 @pytest.mark.parametrize("command", ["/roast", "@pozor_me_bot", "@pozor_me_bot попусти"])
 async def test_reply_text_reaches_real_context_before_generation(scope, monkeypatch, command):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
 
     pipeline, _database, clock, _, generator = scope
     monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
@@ -545,6 +545,21 @@ async def test_real_ingestion_edit_invalidates_ready_result(scope):
     await p.send_once()
     assert bot.calls == []
     assert state(db)[0]["status"] == "cancelled"
+    await p.aclose()
+
+
+async def test_source_hash_edit_cannot_send_after_journal_invalidation(scope,tmp_path):
+    p,database,_,bot,_=scope
+    imported(database,tmp_path)
+    start(scope)
+    await generated(p)
+    with connect(database) as db:
+        assert db.execute('SELECT count(*) FROM generations').fetchone()[0]==1
+        # The database trigger, rather than an ingestion epoch bump, removes the
+        # private journal copy. The final send guard must notice that removal.
+        db.execute("UPDATE messages SET text='изменено',text_hash='new' WHERE origin='export'")
+    await p.send_once()
+    assert bot.calls==[]
     await p.aclose()
 
 
@@ -621,7 +636,7 @@ async def test_initiator_reply_continues_with_memory(scope):
 
 
 async def test_explicit_mention_target_replaces_session_and_cancels_old_answer(scope, monkeypatch):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
 
     p, db, clock, bot, _ = scope
     monkeypatch.setattr(commands, "utc_now", lambda: int(clock()))
@@ -673,11 +688,11 @@ async def test_rebuild_loop_stops_after_two_replacements(scope):
     p, db, _, bot, generator = scope
     generator.release.clear()
     sid = start(scope)
-    await generator.entered.wait()
+    await asyncio.wait_for(generator.entered.wait(),2)
     for mid in (2, 3):
         generator.entered.clear()
         assert p.accept(sid, mid, f"ответ {mid}", first=True)
-        await generator.entered.wait()
+        await asyncio.wait_for(generator.entered.wait(),2)
     assert not p.accept(sid, 4, "непрерывный поток", first=True)
     generator.release.set()
     await generated(p)
@@ -753,7 +768,7 @@ async def test_queue_busy_before_start_does_not_open_session(scope):
 
 @pytest.mark.asyncio
 async def test_retrieval_timeout_is_terminal(scope, monkeypatch):
-    from pozor import delivery
+    from pozor.infra.sqlite import delivery
 
     p, db, _, bot, generator = scope
     attempts = []
@@ -868,7 +883,7 @@ async def test_forget_during_inference_purges_and_cancels_without_resurrection(s
     p, db, clock, bot, generator = scope
     generator.release.clear()
     start(scope)
-    await generator.entered.wait()
+    await asyncio.wait_for(generator.entered.wait(),2)
     await p.handle_update(incoming(clock, actor=42, mid=2, text='/forget_me'),
                           bot_id=99, bot_username='pozor_me_bot', owner_ids=frozenset())
     generator.release.set()
@@ -886,7 +901,7 @@ async def test_forget_during_inference_purges_and_cancels_without_resurrection(s
     ("/roast меня за опоздание", "roast"),
 ])
 async def test_self_roast_and_targetless_dialogue(scope, monkeypatch, text, mode):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
     from pozor.llm import messages_for
 
     p, database, clock, bot, generator = scope
@@ -923,7 +938,7 @@ async def test_self_roast_and_targetless_dialogue(scope, monkeypatch, text, mode
 
 
 async def test_self_roast_still_requires_consent(scope, monkeypatch):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
 
     p, database, clock, bot, generator = scope
     monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
@@ -974,7 +989,7 @@ async def test_question_during_roast_preserves_mode_and_replies_to_question(scop
 
 @pytest.mark.parametrize('address', ['tag', 'tag_target', 'reply_target'])
 async def test_same_target_repeated_address_keeps_round_and_authorship(scope, monkeypatch, address):
-    from pozor import commands
+    from pozor.infra.sqlite import commands
     p, database, clock, bot, generator = scope
     monkeypatch.setattr(commands, 'utc_now', lambda: int(clock()))
     with connect(database) as db:

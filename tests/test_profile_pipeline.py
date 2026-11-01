@@ -15,14 +15,15 @@ from pydantic import SecretStr
 from telethon import errors, types
 
 from pozor import admin_pipeline, semantic_profiles
-from pozor.admin import AdminData, make_server
-from pozor.admin_pipeline import AdminPipeline
+from pozor.admin import AdminData
 from pozor.config import Settings
 from pozor.context import fuse, retrieve
 from pozor.llm import LlamaClient
 from pozor.privacy import forget
 from pozor.storage import connect, migrate
 from pozor.telegram_account import AccountError, TelegramAccount
+from tests.admin_harness import PipelineHarness as AdminPipeline
+from tests.admin_harness import make_server
 
 
 @pytest.fixture
@@ -98,10 +99,10 @@ def test_history_import_review_save_and_admin_read(database, pipeline):
         {"index": 0, "summary": "Обсуждает шахматы"}]}) == {"saved": 1}
     profile = AdminData(database).read("/api/profiles", {"chat": ["-1"]})["profiles"][0]
     assert profile["cards"][0]["summary"] == "Обсуждает шахматы"
-    assert profile["cards"][0]["profile_version"] == 2
+    assert profile["cards"][0]["provenance"] == "reviewed"
     from unittest.mock import patch
 
-    with patch("pozor.context.fuse", wraps=fuse) as ranking:
+    with patch("pozor.infra.sqlite.retrieval.fuse", wraps=fuse) as ranking:
         retrieve(database, chat_id=-1, thread_id=0, target_id=42, trigger_id=999,
                  hint="Игра", target_label="Alice", cards_enabled=False)
     assert ranking.call_args.args[0][3][1]  # Reviewed evidence works without automatic cards.
@@ -304,7 +305,8 @@ def test_http_mutations_require_auth_origin_and_json(database, pipeline):
             assert client.get("/api/telegram/status").status_code == 401
             assert client.post("/api/telegram/cancel", json={}).status_code == 401
             assert client.get("/pipeline.js").status_code == 200
-            client.post("/api/login", json={"password": "test-admin-password-123"})
+            response = client.post("/api/login", json={"password": "test-admin-password-123"})
+            client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
             assert client.get("/api/telegram/status").json()["state"] == "connected"
             assert client.get("/api/telegram/members?chat=-1").json()["members"][0]["user_id"] == 42
             assert client.post("/api/telegram/cancel", json={}, headers={"Origin": "https://evil.test"}).status_code == 403

@@ -1,0 +1,13 @@
+{
+  "fallback": false,
+  "reason": null,
+  "candidates": 5,
+  "latency_seconds": 21.72,
+  "result": {
+    "angle": "пятнадцать тысяч",
+    "text": "Участник, Пятнадцать тысяч — это не цена, это инвестиция в то, что ты не засыпал на доту.",
+    "evidence_ids": [
+      "trigger:1"
+    ]
+  }
+}
