@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "docker_live_smoke_verified_quality_pending",
+  "status": "humor_v2_offline_validation_live_quality_pending",
   "llama_cpp_build": "b11718-547208dca",
   "llama_cpp_artifact": {
     "filename": "llama-server",
@@ -18,7 +18,7 @@
     "context_size": 8192,
     "slots": 1,
     "enable_thinking": false,
-    "max_output_tokens": 180
+    "max_output_tokens": 600
   },
   "verification": {
     "real_smoke": true,
@@ -27,7 +27,8 @@
     "latency": {
       "p50": 612.5187999996342,
       "p95": 794.8354999998628
-    }
+    },
+    "applies_to": "Previous v1 runtime at 180 output tokens; not a v2 latency claim"
   },
   "acceptance": {
     "t6_human_quality": "pending",

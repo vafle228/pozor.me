@@ -60,6 +60,10 @@ def recover_delivery(database: Path) -> None:
 
 def guard(db: sqlite3.Connection, turn: sqlite3.Row, now: float) -> bool:
     """Production equivalent of may_publish, plus chat and durable consent guards."""
+    if (turn['status'] in {'ready','sending'} and turn['context_hash'] is not None
+            and not db.execute('SELECT 1 FROM generations WHERE session_id=? AND turn_no=?',
+                               (turn['session_id'],turn['turn_no'])).fetchone()):
+        return False
     row = db.execute(
         """SELECT s.*,m.consent,m.opt_out,c.allowed,c.enabled,
            COALESCE(e.epoch,0) AS epoch FROM sessions s
@@ -234,10 +238,12 @@ class DeliveryPipeline:
                         )
                         angles, previous_answers, used_sources, examples = await asyncio.to_thread(
                             self.generation_log.memory, s['chat_id'], s['target_id'])
+                        mechanisms=await asyncio.to_thread(self.generation_log.mechanisms,s['chat_id'])
                         hooks = await asyncio.to_thread(select_hooks,self.database,s['chat_id'],s['target_id'],
                             pack.trigger.text,min(settings.roast_level,s['roast_level']),used_sources)
                         pack = pack.model_copy(update={"session_turns": list(dict.fromkeys([*previous_answers,*memory])), "mode": s["mode"],
                             "forbidden_angles": angles, "few_shot": examples, "hooks": hooks, "repetition_texts": previous_answers,
+                            "recent_mechanisms":mechanisms,
                             "level": min(settings.roast_level,s["roast_level"]),
                             "conversation": conversation, "initiator_id": s['initiator_id'],
                             "speaker_id": inputs[-1]['author_id'],
@@ -324,7 +330,7 @@ class DeliveryPipeline:
         result = await self.generator.generate(pack, deadline)
         result = result.model_copy(update={'latency_ms': (asyncio.get_running_loop().time()-started)*1000})
         generation_id = await asyncio.to_thread(self.generation_log.record, pack, result,
-            self.settings_service.snapshot() if self.settings_service else self.settings, sid, number)
+            self.settings_service.snapshot() if self.settings_service else self.settings, sid, number,revision)
         if generation_id is None:
             raise InferenceError('stale_after_inference')
         return result.model_copy(update={'generation_id': generation_id})
@@ -335,6 +341,9 @@ class DeliveryPipeline:
             turn = db.execute("SELECT * FROM turns WHERE session_id=? AND turn_no=?", (sid, number)).fetchone()
             if (turn is None or turn["revision"] != revision or turn["status"] != "generating"
                     or not guard(db, turn, self.clock())):
+                return False
+            if not db.execute('SELECT 1 FROM generations WHERE id=? AND session_id=? AND turn_no=?',
+                              (result.generation_id,sid,number)).fetchone():
                 return False
             session = db.execute('SELECT chat_id,target_id FROM sessions WHERE id=?', (sid,)).fetchone()
             if not sources_current(db, session['chat_id'], session['target_id'],

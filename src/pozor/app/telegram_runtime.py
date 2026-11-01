@@ -81,8 +81,10 @@ async def run_telegram(settings: Settings, container: Container | None = None) -
         source = AiogramUpdateSource(bot)
         pipeline = DeliveryPipeline(database_path,settings,bot,container.generator,container.queue)
         pipeline.settings_service = container.service
-        from pozor.presentation.telegram_bot.commands import handle_telegram_update
-        pipeline.control_handler = handle_telegram_update
+        from pozor.presentation.telegram_bot.commands import TelegramControls
+        controls=TelegramControls(database_path,owner_ids=frozenset(settings.owner_ids),
+            bot_id=identity.id,bot_username=identity.username,settings=settings)
+        pipeline.control_handler = controls
 
         async def cleanup_loop() -> None:
             while True:
@@ -121,6 +123,7 @@ async def run_telegram(settings: Settings, container: Container | None = None) -
             for task in tasks:
                 task.cancel()
             await pipeline.aclose()
+            await controls.aclose()
             for task in tasks:
                 with suppress(asyncio.CancelledError):
                     await task

@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from aiogram import Bot, Router
+from aiogram import Bot, Dispatcher, Router
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -181,10 +181,32 @@ async def handle_telegram_update(database_path: Path, bot: Bot, payload: dict[st
 def router(database: Path, *, owner_ids: frozenset[int], bot_id: int, bot_username: str | None,
            settings: Settings) -> Router:
     result = Router(name='pozor-controls')
-    async def message_handler(message: Message,bot: Bot) -> None:
-        await handle_message(database,bot,message,owner_ids=owner_ids,bot_id=bot_id,bot_username=bot_username,settings=settings)
+    async def message_handler(message: Message,bot: Bot,runtime_settings: Settings | None = None) -> None:
+        await handle_message(database,bot,message,owner_ids=owner_ids,bot_id=bot_id,bot_username=bot_username,settings=runtime_settings or settings)
     async def callback_handler(query: CallbackQuery,bot: Bot) -> None:
         await handle_callback(database,bot,query)
     result.message.register(message_handler)
     result.callback_query.register(callback_handler)
     return result
+
+
+class TelegramControls:
+    """Feed durable inbox records through aiogram without a second poller."""
+
+    def __init__(self,database: Path,*,owner_ids: frozenset[int],bot_id: int,
+                 bot_username: str | None,settings: Settings):
+        self.dispatcher=Dispatcher(disable_fsm=True)
+        self.dispatcher.include_router(router(database,owner_ids=owner_ids,bot_id=bot_id,
+            bot_username=bot_username,settings=settings))
+
+    async def __call__(self,database_path: Path,bot: Bot,payload: dict[str,object],*,
+                       owner_ids: frozenset[int],bot_id: int,bot_username: str | None = None,
+                       settings: Settings | None = None) -> None:
+        try:
+            update=Update.model_validate(payload)
+        except ValidationError:
+            return
+        await self.dispatcher.feed_update(bot,update,runtime_settings=settings)
+
+    async def aclose(self) -> None:
+        await self.dispatcher.storage.close()

@@ -55,6 +55,4 @@ def test_source_edit_erases_private_generation_copy(tmp_path):
     assert repo.memory(-1,42)==([],[],set(),[])
     # A stale in-flight snapshot must not resurrect the edited text.
     # Hashes in entitlement alone aren't enough; the journal validates its snapshot.
-    with connect(database) as db:
-        db.execute('INSERT INTO data_epochs(chat_id,target_id,epoch) VALUES (-1,42,1)')
     assert repo.record(pack,result,Settings(_env_file=None,database_path=database),sid,1) is None

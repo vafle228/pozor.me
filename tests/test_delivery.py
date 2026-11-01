@@ -548,6 +548,21 @@ async def test_real_ingestion_edit_invalidates_ready_result(scope):
     await p.aclose()
 
 
+async def test_source_hash_edit_cannot_send_after_journal_invalidation(scope,tmp_path):
+    p,database,_,bot,_=scope
+    imported(database,tmp_path)
+    start(scope)
+    await generated(p)
+    with connect(database) as db:
+        assert db.execute('SELECT count(*) FROM generations').fetchone()[0]==1
+        # The database trigger, rather than an ingestion epoch bump, removes the
+        # private journal copy. The final send guard must notice that removal.
+        db.execute("UPDATE messages SET text='изменено',text_hash='new' WHERE origin='export'")
+    await p.send_once()
+    assert bot.calls==[]
+    await p.aclose()
+
+
 @pytest.mark.asyncio
 async def test_edit_trigger_cancels_even_without_subject_epoch(scope):
     p, db, _, bot, _ = scope

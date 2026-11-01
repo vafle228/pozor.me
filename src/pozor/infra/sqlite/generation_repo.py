@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pozor import __version__
 from pozor.config import Settings
 from pozor.core.domain.context import ContextPack, ConversationTurn
 from pozor.core.domain.generation import GenerationResult
@@ -17,25 +18,46 @@ class GenerationRepository:
         self.database = database
 
     def record(self, pack: ContextPack, result: GenerationResult, settings: Settings,
-               session_id: str, turn_no: int) -> int | None:
+               session_id: str, turn_no: int, revision: int | None = None) -> int | None:
         with connect(self.database) as db:
             db.execute('BEGIN IMMEDIATE')
-            current = db.execute("SELECT s.state,m.consent,m.opt_out,coalesce(e.epoch,0) AS epoch FROM sessions s "
+            current = db.execute("SELECT s.state,s.revision,c.allowed,c.enabled,m.consent,m.opt_out,coalesce(e.epoch,0) AS epoch FROM sessions s "
                 "JOIN members m ON m.chat_id=s.chat_id AND m.user_id=s.target_id "
+                "JOIN chats c ON c.chat_id=s.chat_id "
                 "LEFT JOIN data_epochs e ON e.chat_id=s.chat_id AND e.target_id=s.target_id WHERE s.id=?",
                 (session_id,)).fetchone()
             ids = [e.evidence_id for e in [*pack.recent,*pack.evidence]]
             ids += [f'message:{h.source_id}' for h in pack.hooks]
             if (not current or current['state'] != 'active' or not current['consent'] or current['opt_out']
+                    or not current['allowed'] or not current['enabled']
+                    or revision is not None and current['revision']!=revision
                     or current['epoch'] != pack.evidence_epoch
                     or not sources_current(db,pack.chat_id,pack.target_id,ids,time.time())):
                 return None
+            for evidence in [*pack.recent,*pack.evidence]:
+                if not evidence.text_hash:
+                    continue
+                if evidence.evidence_id.startswith('message:'):
+                    source=db.execute('SELECT text_hash FROM messages WHERE id=?',(evidence.evidence_id[8:],)).fetchone()
+                else:
+                    source=db.execute('SELECT text_hash FROM manual_items WHERE item_id=?',(evidence.evidence_id[7:],)).fetchone()
+                if not source or source['text_hash']!=evidence.text_hash:
+                    return None
+            for hook in pack.hooks:
+                if not db.execute("SELECT 1 FROM profile_items p JOIN profile_item_sources s ON s.card_id=p.id "
+                    "WHERE p.chat_id=? AND p.target_id=? AND p.kind='hook' AND p.excluded=0 AND p.quote=? AND s.message_id=?",
+                    (pack.chat_id,pack.target_id,hook.quote,hook.source_id)).fetchone():
+                    return None
+            for memory in pack.dossier:
+                if not db.execute("SELECT 1 FROM profile_items WHERE chat_id=? AND target_id=? AND kind='dossier' "
+                    "AND excluded=0 AND summary=?",(pack.chat_id,pack.target_id,memory.summary)).fetchone():
+                    return None
             version = db.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]
             values = (pack.chat_id, pack.target_id, session_id, turn_no, pack.mode,
-                result.prompt_version, '0.2.0', version, settings.llm_model,
-                json.dumps({k: getattr(settings, k) for k in ('temperature','top_p','min_p','presence_penalty','max_output_tokens')}),
-                pack.model_dump_json(exclude={'repetition_texts'}), json.dumps(result.candidates, ensure_ascii=False),
-                result.roast.model_dump_json(), result.judge_reason, result.latency_ms,
+                result.prompt_version, __version__, version, result.model_name or settings.llm_model,
+                json.dumps(result.sampling_params or {k: getattr(settings, k) for k in ('temperature','top_p','min_p','presence_penalty','max_output_tokens')}),
+                result.request_json or pack.model_dump_json(exclude={'repetition_texts'}), json.dumps(result.candidates, ensure_ascii=False),
+                json.dumps(result.roast.model_dump()|{'mechanism':result.selected_mechanism},ensure_ascii=False), result.judge_reason, result.latency_ms,
                 result.reason, time.time())
             db.execute('''INSERT INTO generations(chat_id,target_id,session_id,turn_no,mode,prompt_version,
                 code_version,schema_version,model,params_json,request_json,candidates_json,selected_json,
@@ -99,6 +121,13 @@ class GenerationRepository:
                        'DO UPDATE SET rating=excluded.rating,updated_at=excluded.updated_at',
                        (generation_id,user,rating,time.time()))
             return True
+
+    def mechanisms(self,chat: int) -> list[str]:
+        with connect(self.database) as db:
+            rows=db.execute("SELECT g.selected_json FROM generations g JOIN turns t ON t.session_id=g.session_id "
+                "AND t.turn_no=g.turn_no WHERE g.chat_id=? AND t.status='sent' AND g.mode='roast' "
+                "AND g.created_at>? ORDER BY g.created_at DESC LIMIT 8",(chat,time.time()-7*86400)).fetchall()
+        return list(dict.fromkeys(json.loads(r[0]).get('mechanism','') for r in rows if json.loads(r[0]).get('mechanism')))[:2]
 
     def metrics(self) -> dict[str, Any]:
         with connect(self.database) as db:

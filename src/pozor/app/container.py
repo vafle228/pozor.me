@@ -36,14 +36,16 @@ class RequestGenerator:
             generator.failures, generator.open_until = self.failures, self.open_until
             result = await generator.generate(pack, deadline)
             self.failures, self.open_until = generator.failures, generator.open_until
-            return result
+            return result.model_copy(update={'model_name':snapshot.llm_model,'sampling_params':{
+                name:getattr(snapshot,name) for name in ('temperature','top_p','min_p','presence_penalty',
+                    'max_output_tokens','generation_deadline_seconds')}})
 
 
 class Container:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, overrides: dict[str,Any] | None = None):
         self.settings = settings
         self.process_lock = ProcessLock(settings.database_path)
-        self.service = SettingsService(settings)
+        self.service = SettingsService(settings,cli=overrides)
         self.prompts = FilePromptStore()
         self.generator = RequestGenerator(self.service,self.prompts)
         self.client = LlamaClient(settings)
@@ -57,8 +59,12 @@ class Container:
         self.process_lock.acquire()
         try:
             await asyncio.to_thread(migrate,self.settings.database_path)
+            await asyncio.to_thread(self.service.snapshot)
         except BaseException:
-            self.process_lock.release()
+            try:
+                await self.client.__aexit__()
+            finally:
+                self.process_lock.release()
             raise
         await self.client.__aenter__()
         self.settings_task=asyncio.create_task(self.apply_settings())

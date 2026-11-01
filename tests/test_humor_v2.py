@@ -80,3 +80,40 @@ async def test_dialogue_has_its_own_simple_schema():
     result = await Generator(model).generate(context(mode='dialogue'), asyncio.get_running_loop().time()+2)
     assert not result.fallback
     assert list(model.calls[0][1]['schema']['properties']) == ['text']
+
+
+def test_win_rate_requires_forty_pairs_and_sixty_percent():
+    from pozor.core.humor.evaluation import Comparison
+    assert not Comparison(39,39,0,0).accepted
+    assert Comparison(40,24,16,0).accepted
+    assert not Comparison(40,23,17,0).accepted
+
+
+def test_hooks_require_exact_own_source_and_exclude_redlines():
+    from pozor.core.humor.hooks import HookBatch, grounded_hooks
+    sources={1:'Поставил семь будильников и проспал созвон'}
+    base={'why_funny':'будильников больше, чем попыток проснуться','type':'fail','heat':1,'source_id':1}
+    batch=HookBatch.model_validate({'hooks':[base|{'quote':'Поставил семь будильников'},
+        base|{'quote':'Поставил сто будильников'},
+        base|{'source_id':99,'quote':'Поставил семь будильников'},
+        base|{'quote':'Поставил семь будильников','why_funny':'у него диагноз шизофрения'}]})
+    assert len(grounded_hooks(batch,sources))==1
+
+
+def test_level_is_bounded_by_the_target_consent_and_chat():
+    from pozor.core.humor.levels import effective_level, requested_level
+    assert effective_level(3,3,1)==1
+    assert effective_level(2,requested_level('жёстко'),3)==2
+    assert requested_level('мягко')==1
+
+
+def test_third_party_history_is_never_presented_as_target_own_quotes():
+    from pozor.core.humor.candidates import material
+    other=Evidence(evidence_id='message:1',chat_id=-1,allowed_target_id=42,source_namespace='export:1',
+        author_id=7,relation='reply',attribution='third_party',text='Я купил семь будильников')
+    own=Evidence(evidence_id='message:2',chat_id=-1,allowed_target_id=42,source_namespace='export:1',
+        author_id=42,relation='self',attribution='imported_quote',text='Я снова проспал созвон')
+    data=material(context(speaker_id=7,evidence=[other,own]))
+    assert data['quotes']==[own.text]
+    assert data['third_party_context'][0]['text']==other.text
+    assert data['target']=='Алиса' and data['speaker_is_target'] is False

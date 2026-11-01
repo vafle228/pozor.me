@@ -47,6 +47,12 @@ type = "forbidden"
 source_modules = ["pozor.core"]
 forbidden_modules = ["pozor.infra", "pozor.presentation", "pozor.app", "pozor.storage", "pozor.config", "pozor.context", "pozor.llm", "aiogram", "telethon", "sqlite3", "httpx", "pydantic_settings", "os"]
 
+[[tool.importlinter.contracts]]
+name = "Infrastructure cannot depend on application or presentation"
+type = "forbidden"
+source_modules = ["pozor.infra"]
+forbidden_modules = ["pozor.presentation", "pozor.app"]
+
 [project.scripts]
 pozor = "pozor.presentation.cli.main:app"
 

@@ -31,7 +31,7 @@ def read_database(path: Path) -> Iterator[sqlite3.Connection]:
         db.close()
 
 
-def _schema(db: sqlite3.Connection) -> None:
+def _schema(db: sqlite3.Connection, *, allow_older: bool = False) -> None:
     expected = [
         (p.name[:4], p.stem[5:], hashlib.sha256(p.read_bytes()).hexdigest())
         for p in sorted(MIGRATIONS_DIR.glob('[0-9][0-9][0-9][0-9]_*.sql'))
@@ -39,12 +39,12 @@ def _schema(db: sqlite3.Connection) -> None:
     actual = db.execute(
         'SELECT version,name,checksum FROM schema_migrations ORDER BY version'
     ).fetchall()
-    if actual != expected:
+    if actual != expected and not (allow_older and actual and actual==expected[:len(actual)]):
         raise OperationsError('schema mismatch; use the matching application version or migrate first')
 
 
-def _validate(db: sqlite3.Connection) -> None:
-    _schema(db)
+def _validate(db: sqlite3.Connection, *, allow_older: bool = False) -> None:
+    _schema(db,allow_older=allow_older)
     if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
         raise OperationsError('SQLite integrity check failed')
     if db.execute('PRAGMA foreign_key_check').fetchone() is not None:
@@ -54,7 +54,7 @@ def _validate(db: sqlite3.Connection) -> None:
     db.commit()
 
 
-def _snapshot(source: Path, destination: Path, *, recover: bool) -> None:
+def _snapshot(source: Path, destination: Path, *, recover: bool, allow_older: bool = False) -> None:
     source, destination = source.resolve(), destination.resolve()
     if source == destination or destination.exists():
         raise OperationsError('destination must be a new separate path')
@@ -66,7 +66,7 @@ def _snapshot(source: Path, destination: Path, *, recover: bool) -> None:
     temporary = Path(name)
     try:
         with read_database(source) as origin, closing(sqlite3.connect(temporary)) as snapshot:
-            _schema(origin)
+            _schema(origin,allow_older=allow_older)
             # Bound a backup under sustained write contention instead of hanging forever.
             deadline = time.monotonic() + 30
 
@@ -76,7 +76,7 @@ def _snapshot(source: Path, destination: Path, *, recover: bool) -> None:
 
             origin.backup(snapshot, pages=256, progress=progress, sleep=.05)
             snapshot.execute('PRAGMA journal_mode=DELETE')
-            _validate(snapshot)
+            _validate(snapshot,allow_older=allow_older)
         if recover:
             # On a restored timeline no saved pending punch may be retried.
             from pozor.infra.sqlite.delivery import recover_delivery
@@ -98,7 +98,7 @@ def _snapshot(source: Path, destination: Path, *, recover: bool) -> None:
             Path(str(temporary) + suffix).unlink(missing_ok=True)
 
 
-def backup(database: Path, directory: Path, *, retention_days: int = 7) -> Path:
+def backup(database: Path, directory: Path, *, retention_days: int = 7, before_upgrade: bool = False) -> Path:
     """Create a validated snapshot; rotate only owned snapshots after success.
 
     Directory ACLs are the operator's responsibility, especially on Windows.
@@ -108,7 +108,7 @@ def backup(database: Path, directory: Path, *, retention_days: int = 7) -> Path:
     directory = directory.resolve()
     stamp = datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')
     destination = directory / f'pozor-backup-{stamp}-{uuid.uuid4().hex}.sqlite3'
-    _snapshot(database, destination, recover=False)
+    _snapshot(database, destination, recover=False,allow_older=before_upgrade)
     cutoff = time.time() - retention_days * 86400
     for path in directory.glob('pozor-backup-????????T??????Z-????????????????????????????????.sqlite3'):
         if (re.fullmatch(r'pozor-backup-\d{8}T\d{6}Z-[0-9a-f]{32}\.sqlite3', path.name)

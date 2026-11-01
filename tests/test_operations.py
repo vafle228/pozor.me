@@ -16,6 +16,24 @@ from pozor.operations import OperationsError, backup, restore, status
 from pozor.storage import connect, migrate
 
 
+def test_upgrade_backup_accepts_only_verified_older_migration_prefix(tmp_path):
+    from pozor.storage import MIGRATIONS_DIR
+    old=tmp_path/'old-migrations'
+    old.mkdir()
+    for source in MIGRATIONS_DIR.glob('*.sql'):
+        if source.name<'0013':
+            (old/source.name).write_bytes(source.read_bytes())
+    database=tmp_path/'old.sqlite3'
+    migrate(database,old)
+    snapshot=backup(database,tmp_path/'backups',before_upgrade=True)
+    assert snapshot.is_file()
+    with connect(database) as db:
+        assert db.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]=='0012'
+        db.execute("UPDATE schema_migrations SET checksum='bad' WHERE version='0001'")
+    with pytest.raises(OperationsError):
+        backup(database,tmp_path/'backups',before_upgrade=True)
+
+
 @pytest.fixture
 def database(tmp_path):
     path = tmp_path / 'live.sqlite3'

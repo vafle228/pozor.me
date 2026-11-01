@@ -61,7 +61,7 @@ class TelegramAccount:
     async def open(self) -> None:
         if self.client is not None:
             return
-        api_id, api_hash = self.credentials()
+        api_id, api_hash = await asyncio.to_thread(self.credentials)
         if not (api_id and api_hash):
             raise AccountError("Укажите API ID и API Hash приложения Telegram.")
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -84,7 +84,7 @@ class TelegramAccount:
                 await self.open()
             except AccountError:
                 pass
-        api_id, api_hash = self.credentials()
+        api_id, api_hash = await asyncio.to_thread(self.credentials)
         return {"state": self.state, "qr": self.qr,
                 "configured": bool(api_id and api_hash), "credentials_source": self.credentials_source}
 
@@ -96,7 +96,7 @@ class TelegramAccount:
                     or len(api_hash) != 32 or any(c not in "0123456789abcdefABCDEF" for c in api_hash)):
                 raise AccountError("Проверьте API ID и API Hash.")
             await self.close()
-            private_write(self.directory.parent / "secrets.local.json",
+            await asyncio.to_thread(private_write,self.directory.parent / "secrets.local.json",
                           json.dumps({"api_id": api_id, "api_hash": api_hash}))
         await self.open()
         if self.state == "connected":
@@ -119,8 +119,9 @@ class TelegramAccount:
             finally:
                 self.qr = None
 
+        initial_status=await self.status()
         self.login_task = asyncio.create_task(wait())
-        return await self.status()
+        return initial_status
 
     async def password(self, password: str) -> dict[str, Any]:
         if self.state != "password" or not password or len(password) > 256:

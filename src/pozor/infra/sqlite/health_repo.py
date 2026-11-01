@@ -25,7 +25,7 @@ def register_bot(database: Path, user: int) -> None:
 
 def allowed_chats(database: Path) -> list[int]:
     with connect(database) as db:
-        return [r[0] for r in db.execute('SELECT chat_id FROM chats WHERE allowed=1 AND enabled=1')]
+        return [r[0] for r in db.execute('SELECT chat_id FROM chats WHERE allowed=1 AND enabled=1 ORDER BY chat_id DESC')]
 
 
 def exclude_hook(database: Path, item: int) -> None:

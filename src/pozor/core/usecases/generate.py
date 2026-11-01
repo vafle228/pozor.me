@@ -45,9 +45,9 @@ class Generator:
                     system = self.prompts.load('roast') if self.prompts else candidate_messages(packed, MECHANISMS[:5])[0]['content']
                     result = await generate_candidates(self.client, packed, deadline, self.rng, system)
                     if self.prompts:
-                        result = result.model_copy(update={'prompt_version': self.prompts.version('roast')})
+                        result = result.model_copy(update={'prompt_version': 'v2:'+hashlib.sha256(system.encode()).hexdigest()[:16]})
                     self.failures = 0
-                    return result
+                    return result.model_copy(update={'request_json':packed.model_dump_json(exclude={'repetition_texts'})})
                 if self.client.settings.humor_v2_enabled and pack.mode == 'dialogue':
                     return await self.dialogue(pack, deadline)
                 packed = await pack_context(self.client, pack, deadline)
@@ -64,7 +64,7 @@ class Generator:
                         roast = address_roast(validate_output(raw, packed), packed)
                         self.failures = 0
                         return GenerationResult(roast=roast, fallback=False, token_count=count,
-                                                context_hash=digest)
+                                                context_hash=digest,request_json=packed.model_dump_json(exclude={'repetition_texts'}))
                     except InvalidOutput as exc:
                         reason = str(exc)
                         field, rule = exc.field, exc.rule
@@ -116,4 +116,5 @@ class Generator:
             raise InferenceError('redline')
         roast = validate_output(GeneratedRoast(angle='dialogue', text=text,
             evidence_ids=[packed.trigger.evidence_id]).model_dump_json(), packed)
-        return GenerationResult(roast=roast, fallback=False, token_count=count, prompt_version='v2')
+        return GenerationResult(roast=roast, fallback=False, token_count=count, prompt_version='v2',
+            request_json=packed.model_dump_json(exclude={'repetition_texts'}))

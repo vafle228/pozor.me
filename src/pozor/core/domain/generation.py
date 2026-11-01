@@ -33,5 +33,9 @@ class GenerationResult(Contract):
     latency_ms: float = 0
     prompt_version: str = "v1"
     generation_id: int | None = None
+    model_name: str = ''
+    sampling_params: dict[str,float|int|str|bool] = Field(default_factory=dict)
+    request_json: str = Field(default='',exclude=True)
+    selected_mechanism: str = ''
 
 

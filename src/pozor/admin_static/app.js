@@ -37,7 +37,14 @@ function renderChats() {
     const row = node("tr"); row.append(node("td", `${chat.title || "Чат"} · ${chat.chat_id}`));
     const status = node("td"); status.append(node("span", !chat.allowed ? "Не разрешён" : chat.enabled ? "Включён" : "Выключен", `tag${chat.allowed && chat.enabled ? "" : " off"}`)); row.append(status);
     row.append(node("td", chat.members), node("td", `${chat.retention_days} дн.`), node("td", dates(chat.last_message)));
-    const action = node("td"), button = node("button", "Портреты ↗", "ghost"); button.onclick = () => { $("chat").value = String(chat.chat_id); state.offset = 0; page("profiles").catch(failure); }; action.append(button); row.append(action); return row;
+    const action = node("td"), button = node("button", "Портреты ↗", "ghost"); button.onclick = () => { $("chat").value = String(chat.chat_id); state.offset = 0; page("profiles").catch(failure); }; action.append(button);
+    const level = node("select"); level.setAttribute("aria-label", `Максимальный уровень чата ${chat.title || chat.chat_id}`);
+    for (const [value, text] of [[1,"Потолок: L1 · дружески"],[2,"Потолок: L2 · остро"],[3,"Потолок: L3 · жёстко"]]) {
+      const option = node("option", text); option.value = value; level.append(option);
+    }
+    level.value = String(chat.roast_level || 3); level.disabled = !chat.allowed;
+    level.onchange = async () => { try { await api("/api/chats/level", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:chat.chat_id,level:Number(level.value)})}); chat.roast_level = Number(level.value); } catch(error) { level.value = String(chat.roast_level || 3); failure(error); } };
+    action.append(level); row.append(action); return row;
   }));
   if (!state.chats.length) { const row = node("tr"), cell = node("td", "Чаты появятся после того, как бот зарегистрирует их в этой базе."); cell.colSpan = 6; row.append(cell); $("chats").append(row); }
 }

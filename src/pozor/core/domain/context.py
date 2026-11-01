@@ -77,6 +77,7 @@ class ContextPack(Contract):
     hooks: list[Hook] = Field(default_factory=list)
     few_shot: list[ConversationTurn] = Field(default_factory=list)
     repetition_texts: list[str] = Field(default_factory=list)
+    recent_mechanisms: list[str] = Field(default_factory=list)
     evidence_epoch: int = 0
 
     @model_validator(mode="after")

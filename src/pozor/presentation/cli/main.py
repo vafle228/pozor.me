@@ -68,11 +68,18 @@ def eval_retrieval(dataset: Path = Path('tests/fixtures/eval.jsonl')) -> None:
 
 
 @app.command("serve")
-def serve_all() -> None:
+def serve_all(override: list[str] = typer.Option([], '--set')) -> None:  # noqa: B008
     """Бот, админка и фоновые задачи с одной очередью GPU."""
     from pozor.app.runtime import serve
     try:
-        asyncio.run(serve(Settings()))
+        values={}
+        for entry in override:
+            name,raw=entry.split('=',1)
+            try:
+                values[name.lower()]=json.loads(raw)
+            except ValueError:
+                values[name.lower()]=raw
+        asyncio.run(serve(Settings(),overrides=values))
     except (ValueError, ValidationError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from None
@@ -231,12 +238,13 @@ def operation_status() -> None:
 def db_backup(
     directory: Path = typer.Option(..., help="Private backup directory"),  # noqa: B008
     retention_days: int = typer.Option(7, min=1),
+    before_upgrade: bool = False,
 ) -> None:
     """SQLite online backup with integrity/FTS checks and snapshot rotation."""
     from pozor.infra.sqlite.operations import OperationsError, backup
 
     try:
-        path = backup(Settings().database_path, directory, retention_days=retention_days)
+        path = backup(Settings().database_path, directory, retention_days=retention_days,before_upgrade=before_upgrade)
     except (ValidationError, OperationsError, OSError, sqlite3.Error):
         typer.echo("FAIL backup: check paths, permissions, schema and database integrity", err=True)
         raise typer.Exit(1) from None

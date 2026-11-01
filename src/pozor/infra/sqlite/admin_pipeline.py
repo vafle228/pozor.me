@@ -1,4 +1,4 @@
-"""One cancellable import job and expiring review drafts, owned by a dedicated loop."""
+"""Cancellable history jobs on the application loop; blocking I/O uses worker threads."""
 
 from __future__ import annotations
 
@@ -63,6 +63,25 @@ class AdminPipeline:
                 (SELECT 1 FROM forgotten_members f WHERE f.chat_id=m.chat_id AND f.user_id=m.user_id)
                 ORDER BY coalesce(display_name,''),user_id""", (chat,))]
 
+    def scope(self,chat: int,target: int) -> None:
+        with connect(self.database) as db:
+            require_scope(db,chat,target)
+
+    def chat_states(self) -> dict[int,bool]:
+        with connect(self.database) as db:
+            return {r['chat_id']:bool(r['allowed'] and r['enabled']) for r in db.execute('SELECT chat_id,allowed,enabled FROM chats')}
+
+    def activate_chat(self,chat: int,title: str) -> None:
+        with connect(self.database) as db:
+            db.execute("""INSERT INTO chats(chat_id,allowed,enabled,managed_by_admin,title,retention_days)
+                VALUES (?,1,1,1,?,?) ON CONFLICT(chat_id) DO UPDATE SET
+                allowed=1,enabled=1,managed_by_admin=1,title=excluded.title""",(chat,title,self.settings.live_retention_days))
+
+    def display_name(self,chat: int,target: int) -> str | None:
+        with connect(self.database) as db:
+            row=db.execute('SELECT display_name FROM members WHERE chat_id=? AND user_id=?',(chat,target)).fetchone()
+            return row[0] if row else None
+
     async def _dispatch(self, action: str, body: dict[str, Any]) -> Any:
         if action == "status":
             return await self.account.status()
@@ -77,9 +96,7 @@ class AdminPipeline:
             await self.account.disconnect()
             return {"state": "disconnected"}
         if action == "groups":
-            with connect(self.database) as db:
-                chats = {r["chat_id"]: bool(r["allowed"] and r["enabled"])
-                         for r in db.execute("SELECT chat_id,allowed,enabled FROM chats")}
+            chats=await asyncio.to_thread(self.chat_states)
             groups = await self.account.groups(set(chats))
             return {"groups": [group | {"enabled": chats[group["id"]]}
                                for group in groups if group["id"] in chats]}
@@ -111,19 +128,15 @@ class AdminPipeline:
                     member = await bot.get_chat_member(chat, identity.id)
                 if member.status not in {"member", "administrator", "creator"}:
                     raise AccountError("Telegram не подтвердил добавление бота в группу.")
-            with connect(self.database) as db:
-                db.execute("""INSERT INTO chats(chat_id,allowed,enabled,managed_by_admin,title,
-                    retention_days) VALUES (?,1,1,1,?,?) ON CONFLICT(chat_id) DO UPDATE SET
-                    allowed=1,enabled=1,managed_by_admin=1,title=excluded.title""",
-                           (chat, title, self.settings.live_retention_days))
+            await asyncio.to_thread(self.activate_chat,chat,title)
             return {"chat": chat, "title": title}
         if action == "members":
-            return {"members": self.members(int(body["chat"]))}
+            return {"members": await asyncio.to_thread(self.members,int(body["chat"]))}
         if action == "job":
             if self.drafts:
                 try:
                     for current_draft in self.drafts:
-                        semantic_profiles.validate_draft(self.database, current_draft)
+                        await asyncio.to_thread(semantic_profiles.validate_draft,self.database,current_draft)
                 except AccountError:
                     self.drafts.clear()
                     self.job = {"state": "expired", "message": "Источники изменились или черновик устарел."}
@@ -144,8 +157,7 @@ class AdminPipeline:
             if start >= end or (end - start).days > 366:
                 raise AccountError("Выберите период до года; конечная дата не включается (UTC).")
             for target in targets:
-                with connect(self.database) as db:
-                    require_scope(db, chat, target)
+                await asyncio.to_thread(self.scope,chat,target)
             await self.account.open()
             if self.account.state != "connected":
                 raise AccountError("Сначала подключите Telegram.")
@@ -162,7 +174,7 @@ class AdminPipeline:
             selections = body.get("selections")
             if not isinstance(selections, list) or any(not isinstance(s, dict) for s in selections):
                 raise AccountError("Выберите наблюдения для сохранения.")
-            count = semantic_profiles.save(self.database, draft, selections)
+            count = await asyncio.to_thread(semantic_profiles.save,self.database,draft,selections)
             self.drafts.remove(draft)
             return {"saved": count}
         raise AccountError("Неизвестное действие.")
@@ -173,8 +185,7 @@ class AdminPipeline:
                                               lambda n: self.job.update(scanned=n))
             directory = self.database.parent / "staging"
             for target in targets:
-                with connect(self.database) as db:
-                    require_scope(db, chat, target)
+                await asyncio.to_thread(self.scope,chat,target)
                 messages = rows[target]
                 self.job.update(stage="import", target=target)
                 if messages:
@@ -185,16 +196,15 @@ class AdminPipeline:
                     export = {"id": source_id, "type": "private_supergroup", "messages": messages}
                     file = directory / f"account-{chat}-{target}.json"
                     manifest = directory / f"account-{chat}-{target}-manifest.json"
-                    private_write(file, json.dumps(export, ensure_ascii=False))
+                    await asyncio.to_thread(private_write,file,json.dumps(export,ensure_ascii=False))
                     try:
-                        preview_import(self.database, file_path=file, format="telegram-desktop",
+                        await asyncio.to_thread(preview_import,self.database, file_path=file, format="telegram-desktop",
                                        chat_id=chat, target_id=target, manifest_path=manifest,
                                        source_chat_id=source_id, from_date=start.date().isoformat(),
                                        until_date=end.date().isoformat(), timezone="UTC", neighbors=1)
                         # Recheck consent immediately before activation, not only before download.
-                        with connect(self.database) as db:
-                            require_scope(db, chat, target)
-                        _, count = apply_import(self.database, manifest, require_consent=True)
+                        await asyncio.to_thread(self.scope,chat,target)
+                        _, count = await asyncio.to_thread(apply_import,self.database,manifest,require_consent=True)
                         self.job["imported"] += count
                     finally:
                         file.unlink(missing_ok=True)
@@ -204,11 +214,8 @@ class AdminPipeline:
                     self.database, self.settings, chat, target,
                     lambda done, total: self.job.update(analyzed=done, sampled=total),
                     since=start, until=end, queue=self.queue)
-                with connect(self.database) as db:
-                    member = db.execute("SELECT display_name FROM members WHERE chat_id=? AND user_id=?",
-                                        (chat, target)).fetchone()
-                    draft["name"] = member[0] if member else None
-                semantic_profiles.validate_draft(self.database, draft)
+                draft['name']=await asyncio.to_thread(self.display_name,chat,target)
+                await asyncio.to_thread(semantic_profiles.validate_draft,self.database,draft)
                 self.drafts.append(draft)
                 if self.queue is not None:
                     from pozor.infra.sqlite.hook_repo import refresh_hooks
