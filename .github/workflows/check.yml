@@ -1,0 +1,22 @@
+name: checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.7"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv lock --check
+      - run: uv run poe check
+      - run: uv run pozor config template --check
+      - run: uv run pozor deployment check --metadata-only
+      - run: docker build -t pozor-ci .
+      - run: docker run --rm pozor-ci --help

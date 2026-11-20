@@ -16,6 +16,24 @@ from pozor.operations import OperationsError, backup, restore, status
 from pozor.storage import connect, migrate
 
 
+def test_upgrade_backup_accepts_only_verified_older_migration_prefix(tmp_path):
+    from pozor.storage import MIGRATIONS_DIR
+    old=tmp_path/'old-migrations'
+    old.mkdir()
+    for source in MIGRATIONS_DIR.glob('*.sql'):
+        if source.name<'0013':
+            (old/source.name).write_bytes(source.read_bytes())
+    database=tmp_path/'old.sqlite3'
+    migrate(database,old)
+    snapshot=backup(database,tmp_path/'backups',before_upgrade=True)
+    assert snapshot.is_file()
+    with connect(database) as db:
+        assert db.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]=='0012'
+        db.execute("UPDATE schema_migrations SET checksum='bad' WHERE version='0001'")
+    with pytest.raises(OperationsError):
+        backup(database,tmp_path/'backups',before_upgrade=True)
+
+
 @pytest.fixture
 def database(tmp_path):
     path = tmp_path / 'live.sqlite3'
@@ -171,7 +189,7 @@ def test_deployment_checks_file_hashes_configuration_and_missing_baseline(tmp_pa
     lock.write_text(json.dumps({
         'schema_version': 1, 'llama_cpp_build': 'synthetic-build', 'llama_cpp_artifact': artifact(server),
         'model': artifact(model) | {'repo': 'synthetic/repo', 'revision': 'a' * 40, 'alias': 'pozor-local'},
-        'runtime': {'context_size': 8192, 'slots': 1, 'enable_thinking': False, 'max_output_tokens': 180},
+        'runtime': {'context_size': 8192, 'slots': 1, 'enable_thinking': False, 'max_output_tokens': 600},
     }))
     settings = Settings(_env_file=None)
     check_artifacts(lock, model, server, settings)

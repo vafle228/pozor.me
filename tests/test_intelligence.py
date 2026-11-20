@@ -90,7 +90,7 @@ class Server:
 
 
 def settings(**changes):
-    return Settings(_env_file=None, **changes)
+    return Settings(_env_file=None, humor_v2_enabled=False, **changes)
 
 
 async def test_wire_check_structured_generation_and_injection_is_only_user_data():
@@ -298,7 +298,8 @@ def test_retrieval_snapshot_scope_fts_provenance_reply_parent_and_empty(tmp_path
     assert all(e.chat_id == -1 and e.allowed_target_id == 42 for e in all_rows)
     assert not any("секрет" in e.text or "чужой target" in e.text for e in all_rows)
     assert not any(e.source_message_id == 1 for e in result.recent)
-    assert all(e.source_message_id != 2 for e in all_rows)
+    # FTS must preserve the other ranked sources; another thread may be history.
+    assert any(e.source_message_id == 2 for e in result.evidence)
     assert all(e.source_message_id != 2 for e in result.recent)
     assert next(e for e in all_rows if e.source_message_id == 5).attribution == "third_party"
     assert next(e for e in all_rows if e.source_message_id == 6).parent_status == "missing"
@@ -443,7 +444,7 @@ def test_smoke_help_is_offline_and_manifest_keeps_quality_gate_separate():
 
 async def test_invalid_mention_is_retried_without_leaking_raw_output(caplog):
     server = Server(completions=[output(text='@private_handle secret text'), output()])
-    async with LlamaClient(Settings(_env_file=None), transport=httpx.MockTransport(server)) as client:
+    async with LlamaClient(Settings(_env_file=None, humor_v2_enabled=False), transport=httpx.MockTransport(server)) as client:
         result = await Generator(client).generate(pack(), asyncio.get_running_loop().time() + 8)
     assert not result.fallback
     assert 'llm_validation_failed reason=unsafe_text' in caplog.text
@@ -662,12 +663,12 @@ async def test_chat_switch_keeps_quotes_and_dossiers_out_of_other_requests(tmp_p
                 VALUES (?,?,?,10,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'live')""",
                 (mid, chat, f'live:{chat}', target, text, digest))
             db.execute("INSERT INTO message_subjects VALUES (?,?,'self','observed_self')", (mid, target))
-            db.execute("""INSERT INTO profile_cards(id,chat_id,target_id,topic,summary,attribution,
-                kind,first_at,last_at,episodes,profile_version)
+            db.execute("""INSERT INTO profile_items(id,chat_id,target_id,topic,summary,attribution,
+                source_kind,first_at,last_at,episodes,provenance,kind)
                 VALUES (?,?,?,'dossier',?,'observed_self','self_quote',
-                strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),1,4)""",
+                strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),1,'automatic','dossier')""",
                 (mid, chat, target, text))
-            db.execute('INSERT INTO card_evidence VALUES (?,?,?)', (mid, mid, digest))
+            db.execute('INSERT INTO profile_item_sources VALUES (?,?,?)', (mid, mid, digest))
     server = Server([output(evidence_ids=['trigger:99'])] * 3)
     # Reuse the generator and HTTP client just like the running bot. Repeat A
     # after B, with colliding Telegram message IDs and optionally the same user.

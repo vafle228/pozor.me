@@ -1,0 +1,11 @@
+{
+  "synthetic": true,
+  "model": "pozor-local",
+  "max_output_tokens": 600,
+  "deadline_seconds": 30.0,
+  "fallback": false,
+  "reason": null,
+  "candidates": 5,
+  "latency_seconds": 24.51,
+  "text": "Участник, Проспал созвон — теперь врагом считается сама ложка, которая не пробуждает."
+}

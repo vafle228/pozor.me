@@ -1,4 +1,6 @@
-# Запуск и эксплуатация
+# Запуск и эксплуатация V1 (история проекта)
+
+Этот документ сохраняет план и команды этапов T0–T7. Для установки и обновления v0.2 используйте [руководство v0.2](13-v02-runbook.md). В нём описан запуск бота вместе с админкой через `uv run pozor serve`. Актуальные параметры установки приведены в [шаблоне конфигурации](../.env.example).
 
 ## 1. Что понадобится
 
@@ -17,7 +19,7 @@
 
 ```powershell
 uv sync --frozen --extra imports --extra dev
-Copy-Item .env.example .env
+if (-not (Test-Path -LiteralPath .env)) { Copy-Item -LiteralPath .env.example -Destination .env }
 # Заполнить .env локально, не присылать токен в чат и не коммитить.
 uv run pozor doctor
 uv run pozor db migrate

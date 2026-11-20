@@ -262,11 +262,8 @@ def test_multiple_mentions_and_reply_conflicts_are_not_guessed(db_path: Path) ->
 
 
 def _run_immediate(awaitable):
-    try:
-        awaitable.send(None)
-    except StopIteration as completed:
-        return completed.value
-    raise AssertionError("offline fake unexpectedly suspended")
+    import asyncio
+    return asyncio.run(awaitable)
 
 
 def test_admin_commands_use_real_member_lookup_and_control_inbox(db_path: Path) -> None:

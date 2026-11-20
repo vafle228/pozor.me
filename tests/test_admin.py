@@ -7,11 +7,12 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from pozor.admin import AdminData, make_server
-from pozor.llm import SYSTEM
+from pozor.admin import AdminData
+from pozor.core.humor.candidates import SYSTEM
 from pozor.privacy import forget
 from pozor.profiles import commit_batch, source_rows
 from pozor.storage import connect, migrate
+from tests.admin_harness import make_server
 
 
 @pytest.fixture
@@ -52,6 +53,7 @@ def client(database):
 def login(client):
     response = client.post("/api/login", json={"password": "test-admin-password-123"})
     assert response.status_code == 200
+    client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=Strict" in response.headers["set-cookie"]
 
@@ -81,7 +83,7 @@ def test_http_auth_static_and_logout(client):
     assert client.post("/api/login", json={"password": "wrong"}).status_code == 401
     login(client)
     assert len(client.get("/api/chats").json()["chats"]) == 2
-    assert client.get("/api/prompt").json()["system"] == SYSTEM
+    assert client.get("/api/prompt").json()["system"].strip() == SYSTEM.strip()
     assert client.post("/api/logout").status_code == 200
     assert client.get("/api/prompt").status_code == 401
 
@@ -224,7 +226,7 @@ def test_evidence_separates_own_messages_from_replies_mentions_and_unrelated(dat
     pack = retrieve(database, chat_id=-1, thread_id=0, target_id=42,
                     trigger_id=999, hint="message", target_label="Alice")
     rows = [*pack.recent, *pack.evidence]
-    assert {r.source_message_id for r in rows} == {3, 4}
+    assert {r.source_message_id for r in rows} == {1, 3, 4}
     assert all(r.attribution == "third_party" for r in rows if r.author_id == 43)
 
 

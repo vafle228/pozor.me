@@ -1,4 +1,4 @@
-# T7: Docker и live-проверки
+# Docker Compose и проверки T7
 
 Контейнерный запуск: NVIDIA GPU, Docker Desktop с WSL2/GPU support (Windows)
 либо Docker Engine с NVIDIA Container Toolkit (Linux). Веса Qwen3-8B Q4_K_M
@@ -8,19 +8,28 @@
 `ops/docker/download_model.py`; runtime и Python/uv images закреплены по digest.
 Обновлять их нужно явно с повторной приёмкой.
 
+## Запуск v0.2
+
+Подготовьте `.env` по [руководству запуска и обновления](13-v02-runbook.md).
+Сервис `app` запускает `pozor serve` с ботом и админкой. Перед стартом остановите
+другие экземпляры бота, использующие тот же токен.
+
 ```powershell
 docker compose build
-docker compose up -d llm
-docker compose run --rm --no-deps bot llm smoke
-docker compose run --rm --no-deps bot telegram smoke
-# Одно тихое синтетическое сообщение в первой включённой группе реестра, затем удаление:
-docker compose run --rm --no-deps bot telegram smoke --send
-docker compose up -d bot
+docker compose up -d llm app
 docker compose ps
 ```
 
-Не запускайте одновременно второй poller через `pozor run` или старый supervisor.
-Compose передаёт `.env` только боту во время запуска. Никогда не публикуйте
+Админка доступна на хосте по адресу `http://127.0.0.1:8090`.
+Для отдельной проверки модели остановите `app`, оставьте работающий `llm` и выполните
+`docker compose run --rm --no-deps app llm smoke`. После проверки запустите `docker compose up -d app`.
+
+Для проверки Telegram на настроенной установке команда
+`docker compose exec app pozor telegram smoke` обращается к Bot API.
+С флагом `--send` она отправляет одно тихое сообщение в первую включённую группу
+реестра и затем удаляет его.
+
+Compose передаёт `.env` сервису `app` во время запуска. Никогда не публикуйте
 `docker compose config` без `--quiet`, полный `docker inspect` контейнера бота,
 дампы окружения или `.env`. Docker administrators могут читать environment
 контейнера; runtime-файлы и доступ к Docker должны оставаться приватными.
@@ -34,11 +43,11 @@ LLM слушает 8080 внутри сети Compose, с хоста досту�
 сервера не требуется. Log rotation: три файла по 10 МБ на сервис.
 
 ```powershell
-docker compose exec bot pozor status
-docker compose exec bot pozor db backup --directory /data/backups
-docker compose stop bot
+docker compose exec app pozor status
+docker compose exec app pozor db backup --directory /data/backups
+docker compose stop app
 # Новый destination, исходная база остаётся нетронутой:
-docker compose run --rm --no-deps bot db restore --source /data/backups/<snapshot>.sqlite3 --destination /data/recovery.sqlite3
+docker compose run --rm --no-deps app db restore --source /data/backups/<snapshot>.sqlite3 --destination /data/recovery.sqlite3
 docker compose down
 ```
 
@@ -52,7 +61,7 @@ Backup запускается явно; периодический backup тре
 `deployment-lock.json`; поле `llama_cpp_artifact` нельзя заполнять digest образа
 вместо SHA256 исполняемого файла.
 
-## Исправления контрольной точки
+## История контрольной точки T7 от 2026-10-31
 
 - Backup rotation проверяет точный формат имени и пропускает каталоги.
 - Live benchmark учитывает generation deadline из Settings и возвращает failure

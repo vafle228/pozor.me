@@ -112,6 +112,8 @@ logs, выделенную VRAM, драйвер и отсутствие скры
 
 ## Supervisor samples
 
+Примеры служб Windows и systemd из T7 запускают `pozor run` (только бот). Для совместного запуска бота и админки v0.2 используйте `pozor serve` по [руководству установки](13-v02-runbook.md). Перед переходом остановите прежнюю службу бота.
+
 `ops/windows/Start-Pozor.ps1` запускает Bot, Llm или Backup из правильного working
 directory через подготовленную `.venv`. Llm сначала проверяет local artifacts;
 context/alias берёт из lock, slots=1/non-thinking. Не выполняет install/download.

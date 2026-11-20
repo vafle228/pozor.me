@@ -52,7 +52,7 @@ async function historyGroups() {
 }
 function showAccount(account) {
   const labels = {disconnected: "Аккаунт не подключён", connected: "Telegram подключён", qr: "Ожидаем сканирования", password: "Нужен облачный пароль", expired: "Код истёк. Получите новый."};
-  $("tg-state").textContent = labels[account.state] || "Нет соединения";
+  $("tg-state").textContent = (labels[account.state] || "Нет соединения") + (account.credentials_source ? ` · реквизиты: ${account.credentials_source}` : "");
   $("tg-credentials").hidden = account.configured; $("tg-credentials").open = !account.configured;
   $("tg-connect").hidden = account.state === "connected" || account.state === "password";
   $("tg-connect").textContent = account.state === "qr" ? "Получить новый QR-код" : "Подключить по QR-коду";

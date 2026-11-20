@@ -2,6 +2,7 @@
 !pyproject.toml
 !uv.lock
 !README.md
+!deployment-lock.json
 !src/
 !src/**
 !ops/

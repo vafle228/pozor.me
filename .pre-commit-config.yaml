@@ -1,0 +1,13 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.12
+    hooks:
+      - id: ruff
+  - repo: local
+    hooks:
+      - id: private-runtime-files
+        name: Reject secrets and database dumps
+        entry: python ops/check_private_files.py
+        language: system
+        files: '(^|/)(\.env($|\.)|secrets\.local\.json$)|\.(sqlite3?|db|session)(-|$)|(^|/)data/'
+        exclude: '(^|/)\.env\.example$'
