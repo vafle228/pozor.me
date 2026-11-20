@@ -14,12 +14,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pozor.app.container import diagnostic_generation, standalone_inference
 from pozor.config import Settings
 from pozor.core.domain.evaluation import EvalCase, EvalQuote
+from pozor.core.usecases.generate import Generator
 from pozor.infra.sqlite.eval_repo import control_check, prepare
 
 __all__=["EvalCase", "EvalQuote", "benchmark", "control_check", "load_suite", "prepare"]
-from pozor.llm import Generator, LlamaClient
 
 
 def load_suite(path: Path) -> list[EvalCase]:
@@ -52,6 +53,7 @@ async def benchmark(suite: Path, *, live: bool = False, repeat: int = 1) -> dict
         "results": [],
     }
     durations: list[float] = []
+    queue_waits: list[float] = []
     good = total = 0
     with tempfile.TemporaryDirectory(prefix="pozor-eval-") as directory:
         packs = []
@@ -94,29 +96,33 @@ async def benchmark(suite: Path, *, live: bool = False, repeat: int = 1) -> dict
             packs.append(pack)
         if live:
             settings = Settings()
-            async with LlamaClient(settings) as client:
+            async with standalone_inference(settings) as (client, queue):
                 budget = settings.generation_deadline_seconds
                 await client.check(asyncio.get_running_loop().time() + budget)
                 generator = Generator(client)
                 for _ in range(3):
-                    await generator.generate(packs[0], asyncio.get_running_loop().time() + budget)
+                    await diagnostic_generation(
+                        queue, generator, packs[0], asyncio.get_running_loop().time() + budget
+                    )
                 for index, pack in enumerate(packs):
                     if cases[index].category == "control":
                         continue
                     for _ in range(repeat):
-                        before = time.perf_counter()
-                        result = await generator.generate(
-                            pack, asyncio.get_running_loop().time() + budget
+                        completion = await diagnostic_generation(
+                            queue, generator, pack, asyncio.get_running_loop().time() + budget
                         )
-                        elapsed = (time.perf_counter() - before) * 1000
-                        durations.append(elapsed)
+                        result = completion.result
+                        if completion.generation_ms is not None:
+                            durations.append(completion.generation_ms)
+                        queue_waits.append(completion.queue_wait_ms)
                         report["results"][index]["generations"].append(
                             {
                                 "text": result.roast.text,
                                 "evidence_ids": result.roast.evidence_ids,
                                 "characters": len(result.roast.text),
                                 "fallback": result.fallback,
-                                "generation_ms": elapsed,
+                                "generation_ms": completion.generation_ms,
+                                "queue_wait_ms": completion.queue_wait_ms,
                             }
                         )
     report["evidence_coverage"] = good / total if total else None
@@ -135,12 +141,9 @@ async def benchmark(suite: Path, *, live: bool = False, repeat: int = 1) -> dict
         all(not g["fallback"] for r in report["results"] for g in r["generations"])
         if live else None
     )
-    report["model_latency_ms"] = (
-        {
-            "p50": statistics.median(durations),
-            "p95": sorted(durations)[max(0, int(len(durations) * 0.95 + 0.999) - 1)],
-        }
-        if durations
-        else None
-    )
+    for name, values in (("model_latency_ms", durations), ("queue_wait_ms", queue_waits)):
+        report[name] = {
+            "p50": statistics.median(values),
+            "p95": sorted(values)[max(0, int(len(values) * 0.95 + 0.999) - 1)],
+        } if values else None
     return report

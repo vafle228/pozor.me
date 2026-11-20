@@ -1,0 +1,71 @@
+[
+  {
+    "name": "overlapping_requests",
+    "events": [
+      {"kind":"message","at":0,"id":1,"author":11,"text":"На выставке робот заваривал чай.","expect":"silence"},
+      {"kind":"message","at":1,"id":2,"author":12,"text":"На сцене сломался проектор.","expect":"silence"},
+      {"kind":"message","at":2,"id":3,"author":13,"reply_to":1,"text":"Он полчаса искал кнопку кипятка.","expect":"silence"},
+      {"kind":"message","at":3,"id":4,"author":11,"reply_to":2,"text":"Мы показывали слайды на пальцах.","expect":"silence"},
+      {"kind":"message","at":4,"id":5,"author":12,"reply_to":3,"text":"@replay_bot где у него кнопка кипятка?","expect":"reply"},
+      {"kind":"message","at":5,"id":6,"author":13,"reply_to":4,"text":"@replay_bot как показать сороковой слайд?","expect":"reply"},
+      {"kind":"deliver","at":5},
+      {"kind":"message","at":7,"id":7,"author":12,"reply_to_bot_for":6,"text":"А мне тоже хватит десяти пальцев?","expect":"reply"},
+      {"kind":"message","at":8,"id":8,"author":11,"text":"Кстати, чайник уже выключили.","expect":"silence"},
+      {"kind":"deliver","at":8}
+    ]
+  },
+  {
+    "name": "forum_topics",
+    "events": [
+      {"kind":"message","at":0,"id":1,"thread":101,"author":11,"text":"В шахматной теме я играл двумя белыми слонами.","expect":"silence"},
+      {"kind":"message","at":1,"id":2,"thread":202,"author":11,"text":"В кулинарной теме я испёк хлеб с фонариком.","expect":"silence"},
+      {"kind":"message","at":2,"id":3,"thread":101,"author":13,"reply_to":1,"text":"@replay_bot что скажешь про этих слонов?","expect":"reply"},
+      {"kind":"deliver","at":2},
+      {"kind":"message","at":6,"id":4,"thread":202,"author":12,"text":"@replay_bot где искать фонарик в хлебе?","expect":"reply"},
+      {"kind":"deliver","at":6}
+    ]
+  },
+  {
+    "name": "edited_before_send",
+    "events": [
+      {"kind":"message","at":0,"id":1,"author":11,"text":"У обсерватории две луны."},
+      {"kind":"message","at":1,"id":2,"author":12,"reply_to":1,"text":"@replay_bot прожарь автора"},
+      {"kind":"edit","at":2,"id":1,"author":11,"text":"У обсерватории две лупы."},
+      {"kind":"deliver","at":2}
+    ]
+  },
+  {
+    "name": "consent_revoked_before_send",
+    "events": [
+      {"kind":"message","at":0,"id":1,"author":11,"text":"@replay_bot что приготовить на ужин?"},
+      {"kind":"message","at":1,"id":2,"author":11,"text":"/roast_off"},
+      {"kind":"deliver","at":1}
+    ]
+  },
+  {
+    "name": "forgotten_before_send",
+    "events": [
+      {"kind":"message","at":0,"id":1,"author":12,"text":"Я строю будку для телескопа."},
+      {"kind":"message","at":1,"id":2,"author":13,"reply_to":1,"text":"@replay_bot прожарь автора"},
+      {"kind":"message","at":2,"id":3,"author":12,"text":"/forget_me"},
+      {"kind":"deliver","at":2}
+    ]
+  },
+  {
+    "name": "restart_before_send",
+    "events": [
+      {"kind":"message","at":0,"id":1,"author":12,"text":"@replay_bot зачем чайнику режим полёта?"},
+      {"kind":"restart","at":1},
+      {"kind":"deliver","at":1}
+    ]
+  },
+  {
+    "name": "ambiguous_send_and_restart",
+    "events": [
+      {"kind":"message","at":0,"id":1,"author":13,"text":"@replay_bot сколько будильников проспит сова?"},
+      {"kind":"ambiguous","at":0},
+      {"kind":"restart","at":1},
+      {"kind":"deliver","at":4}
+    ]
+  }
+]

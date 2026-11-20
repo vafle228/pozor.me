@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pozor.app.container import diagnostic_generation, standalone_inference
 from pozor.config import Settings
 from pozor.core.domain.context import ContextPack, Evidence
 from pozor.core.usecases.generate import Generator
@@ -28,21 +29,26 @@ async def compare(dataset: Path, variants: list[str], destination: Path, setting
     if len(variants)!=2 or any(v not in {'A','B'} for v in variants):
         raise ValueError('variants: A (legacy v1) and B (candidates v2)')
     output = []
-    for case in cases:
-        pack = ContextPack(chat_id=-1,thread_id=0,target_id=42,target_label='Участник',
-            trigger=Evidence(evidence_id=f"trigger:{case['id']}",chat_id=-1,allowed_target_id=42,
-                source_namespace='request',relation='trigger',attribution='caller_hint',text=case['trigger']))
-        answers = []
-        for variant in variants:
-            snapshot = settings.model_copy(update={'humor_v2_enabled':variant=='B'})
-            async with LlamaClient(snapshot) as client:
-                result = await Generator(client,random.SystemRandom(),FilePromptStore()).generate(
-                    pack,asyncio.get_running_loop().time()+snapshot.generation_deadline_seconds)
-                answers.append({'variant':variant,'text':result.roast.text,'angle':result.roast.angle,
-                    'fallback':result.fallback,'latency_ms':result.latency_ms})
-        random.SystemRandom().shuffle(answers)
-        output.append({'case_id':case['id'],'trigger':case['trigger'],'left':answers[0],'right':answers[1],
-                       'vote':None})
+    rng = random.SystemRandom()
+    prompts = FilePromptStore()
+    async with standalone_inference(settings) as (_, queue):
+        for case in cases:
+            pack = ContextPack(chat_id=-1,thread_id=0,target_id=42,target_label='Участник',
+                trigger=Evidence(evidence_id=f"trigger:{case['id']}",chat_id=-1,allowed_target_id=42,
+                    source_namespace='request',relation='trigger',attribution='caller_hint',text=case['trigger']))
+            answers = []
+            for variant in variants:
+                snapshot = settings.model_copy(update={'humor_v2_enabled':variant=='B'})
+                async with LlamaClient(snapshot) as client:
+                    generator = Generator(client, rng, prompts)
+                    deadline = asyncio.get_running_loop().time() + snapshot.generation_deadline_seconds
+                    completion = await diagnostic_generation(queue, generator, pack, deadline)
+                    result = completion.result
+                    answers.append({'variant':variant,'text':result.roast.text,'angle':result.roast.angle,
+                        'fallback':result.fallback,'latency_ms':result.latency_ms})
+            rng.shuffle(answers)
+            output.append({'case_id':case['id'],'trigger':case['trigger'],'left':answers[0],'right':answers[1],
+                           'vote':None})
     report = {'created_at':time.time(),'dataset':dataset.name,'pairs':output,
               'acceptance':{'minimum_pairs':40,'minimum_win_rate':.6,'requires_human_votes':True}}
     destination.parent.mkdir(parents=True,exist_ok=True)

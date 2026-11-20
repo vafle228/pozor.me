@@ -51,7 +51,7 @@ def control_check(database: Path, case: EvalCase) -> bool | None:
     if case.action == "none":
         return None
     from pozor.infra.sqlite.commands import close_session, set_consent, start_session
-    from pozor.infra.sqlite.delivery import guard
+    from pozor.infra.sqlite.delivery_state import guard
     from pozor.infra.sqlite.privacy_repo import bump, forget
 
     now = int(time.time())

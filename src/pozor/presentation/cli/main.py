@@ -5,11 +5,13 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from aiogram.exceptions import TelegramAPIError
 from pydantic import ValidationError
 
+from pozor.app.container import DiagnosticBusy, diagnostic_generation, standalone_inference
 from pozor.app.doctor import run_checks
 from pozor.app.telegram_runtime import run_telegram
 from pozor.config import Settings
@@ -24,7 +26,7 @@ from pozor.infra.sqlite.import_repo import (
     rollback_import,
 )
 from pozor.infra.sqlite.ingestion import ChatMigrationConflict, PollingConflictError
-from pozor.llm import Generator, InferenceError, LlamaClient
+from pozor.llm import Generator, InferenceError
 
 app = typer.Typer(help="Локальный Telegram-бот pozor.me", no_args_is_help=True)
 config_app = typer.Typer(help="Настройки, их владельцы и источники")
@@ -42,7 +44,12 @@ def eval_humor(dataset: Path = Path('tests/fixtures/humor_synthetic.jsonl'),
         cases = load_cases(dataset)
         typer.echo(f'OK {len(cases)} synthetic contract cases; human quality is not measured')
     else:
-        typer.echo(json.dumps(asyncio.run(compare(dataset,variant,output,Settings())),ensure_ascii=False))
+        try:
+            report = asyncio.run(compare(dataset, variant, output, Settings()))
+        except DiagnosticBusy as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from None
+        typer.echo(json.dumps(report, ensure_ascii=False))
 
 
 @eval_app.command('publish')
@@ -65,6 +72,30 @@ def eval_results(chat: int, variant: str = 'B') -> None:
 def eval_retrieval(dataset: Path = Path('tests/fixtures/eval.jsonl')) -> None:
     from pozor.app.evaluation import benchmark
     typer.echo(json.dumps(asyncio.run(benchmark(dataset)),ensure_ascii=False))
+
+
+@eval_app.command('replay')
+def eval_replay(
+    output: Annotated[Path, typer.Option(help="Новый JSON-файл для результатов.")],
+    suite: Path = Path("tests/fixtures/conversation_replay.json"),
+    live: bool = typer.Option(False, "--live", help="Использовать локальную модель llama.cpp."),
+    port: int = typer.Option(18080, min=1, max=65535, help="Порт модели на 127.0.0.1."),
+) -> None:
+    """Проиграть синтетическую групповую беседу на временных БД с локальной доставкой."""
+    from pozor.app.conversation_replay import replay
+
+    if output.suffix.lower() != ".json" or output.exists():
+        raise typer.BadParameter("Укажите путь к новому JSON-файлу.", param_hint="--output")
+    try:
+        report = asyncio.run(replay(suite, live=live, port=port))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+    except (InferenceError, ValueError, OSError) as exc:
+        typer.echo(f"Replay failed: {exc}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"{report['mode']}: {len(report['scenarios'])} scenarios, {output}")
 
 
 @app.command("serve")
@@ -283,7 +314,11 @@ def run_benchmark(
 ) -> None:
     from pozor.app.evaluation import benchmark
 
-    report = asyncio.run(benchmark(suite, live=live, repeat=repeat))
+    try:
+        report = asyncio.run(benchmark(suite, live=live, repeat=repeat))
+    except DiagnosticBusy as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     typer.echo(f"OK report: {output}; human review pending")
     if not report['retrieval_pass'] or report.get('model_pass') is False:
@@ -307,16 +342,16 @@ def llm_smoke() -> None:
     """
     async def smoke(settings: Settings) -> None:
         deadline = asyncio.get_running_loop().time() + settings.generation_deadline_seconds
-        async with LlamaClient(settings) as client:
+        async with standalone_inference(settings) as (client, queue):
             await client.check(deadline)
-            await client.wait_idle(deadline)
             pack = ContextPack(
                 chat_id=-1, thread_id=0, target_id=1, target_label="Synthetic",
                 trigger=Evidence(evidence_id="trigger:1", chat_id=-1, allowed_target_id=1,
                                  source_namespace="request", relation="trigger",
                                  attribution="caller_hint", text="Обещаю выиграть в игре"),
             )
-            result = await Generator(client).generate(pack, deadline)
+            completion = await diagnostic_generation(queue, Generator(client), pack, deadline)
+            result = completion.result
             if result.fallback:
                 raise InferenceError(result.reason)
             typer.echo(f"OK structured non-thinking smoke; prompt tokens={result.token_count}")
@@ -325,6 +360,9 @@ def llm_smoke() -> None:
         settings = Settings()
         configure_logging(settings)
         asyncio.run(smoke(settings))
+    except DiagnosticBusy as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
     except (ValidationError, InferenceError, TimeoutError):
         typer.echo("FAIL llm smoke: check local server, model alias, template and deadline", err=True)
         raise typer.Exit(code=1) from None

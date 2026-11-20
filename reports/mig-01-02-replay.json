@@ -1,0 +1,207 @@
+{
+  "date": "2026-11-20",
+  "starting_revision": "b733620",
+  "suite_sha256": "62fa580c9995b123f381006ec144f51eade19d32cd605afc7d00e54080234bfd",
+  "model": {
+    "filename": "Qwen3-8B-Q4_K_M.gguf",
+    "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+    "repo": "Qwen/Qwen3-8B-GGUF",
+    "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+    "alias": "pozor-local"
+  },
+  "llama_cpp_build": "b11718-547208dca",
+  "server_sha256_verified": "d76f2785045aaaccb9bbcf2de86f880cb3e8c16d7e11ceb7f12e042d3726633e",
+  "model_sha256_verified": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+  "gpu": "RTX 5060 Ti 16 GB",
+  "transport": "in_memory",
+  "schedule": "generation settles after each input; delivery and restart at explicit checkpoints",
+  "slots": 1,
+  "runtime_settings": {
+    "admin_login_attempts": 5,
+    "admin_login_window_seconds": 600,
+    "humor_v2_enabled": true,
+    "roast_level": 2,
+    "target_daily_round_limit": 12,
+    "temperature": 0.9,
+    "top_p": 0.95,
+    "min_p": 0.05,
+    "presence_penalty": 0.4,
+    "hook_temperature": 0.3,
+    "retrieval_min_terms": 2,
+    "recent_token_budget": 900,
+    "session_token_budget": 600,
+    "conversation_token_budget": 800,
+    "dossier_token_budget": 900,
+    "token_reserve": 512,
+    "queue_capacity": 8,
+    "background_queue_capacity": 16,
+    "background_timeout_seconds": 60.0,
+    "prompt_version": "v2",
+    "context_size": 8192,
+    "max_output_tokens": 600,
+    "generation_deadline_seconds": 30.0,
+    "historical_token_budget": 1200,
+    "per_topic_limit": 2,
+    "retrieval_weights": [
+      1.0,
+      0.8,
+      0.5,
+      0.6
+    ],
+    "live_retention_days": 30,
+    "import_retention_days": 90,
+    "profile_cards_enabled": false,
+    "semantic_profiles_enabled": true
+  },
+  "runs": {
+    "before": {
+      "source_sha256": "669a1b7e184a558bc8c17534ae3f0ecf2cb90462374693ff710f9628c49976f0",
+      "generation_calls": 9,
+      "fallbacks": 0,
+      "latency_ms": {
+        "min": 541.1,
+        "median": 5356.9,
+        "max": 6506.0
+      },
+      "git_commit": "b733620"
+    },
+    "after": {
+      "source_sha256": "81775de29d1b5197fe89e1220361fe4f98ebea0e979c6cb63fdae4220643f93c",
+      "generation_calls": 9,
+      "fallbacks": 0,
+      "latency_ms": {
+        "min": 638.3,
+        "median": 5252.3,
+        "max": 7219.4
+      },
+      "git_commit": "37f178f"
+    }
+  },
+  "same_deterministic_events_except_clocks": true,
+  "same_model_routing_and_outcomes": true,
+  "scenarios": [
+    {
+      "scenario": "overlapping_requests",
+      "expected_reply_to": [
+        5,
+        6,
+        7
+      ],
+      "confirmed_reply_to": [
+        6
+      ],
+      "missed": [
+        5,
+        7
+      ],
+      "silence_cases": 5,
+      "unwanted_interventions": [],
+      "attempts": [
+        [
+          0,
+          6,
+          "sent"
+        ]
+      ],
+      "turn_outcomes": [
+        "cancelled",
+        "sent"
+      ]
+    },
+    {
+      "scenario": "forum_topics",
+      "expected_reply_to": [
+        3,
+        4
+      ],
+      "confirmed_reply_to": [
+        3,
+        4
+      ],
+      "missed": [],
+      "silence_cases": 2,
+      "unwanted_interventions": [],
+      "attempts": [
+        [
+          101,
+          3,
+          "sent"
+        ],
+        [
+          202,
+          4,
+          "sent"
+        ]
+      ],
+      "turn_outcomes": [
+        "sent",
+        "sent"
+      ]
+    },
+    {
+      "scenario": "edited_before_send",
+      "expected_reply_to": [],
+      "confirmed_reply_to": [],
+      "missed": [],
+      "silence_cases": 0,
+      "unwanted_interventions": [],
+      "attempts": [],
+      "turn_outcomes": [
+        "cancelled"
+      ]
+    },
+    {
+      "scenario": "consent_revoked_before_send",
+      "expected_reply_to": [],
+      "confirmed_reply_to": [],
+      "missed": [],
+      "silence_cases": 0,
+      "unwanted_interventions": [],
+      "attempts": [],
+      "turn_outcomes": [
+        "cancelled"
+      ]
+    },
+    {
+      "scenario": "forgotten_before_send",
+      "expected_reply_to": [],
+      "confirmed_reply_to": [],
+      "missed": [],
+      "silence_cases": 0,
+      "unwanted_interventions": [],
+      "attempts": [],
+      "turn_outcomes": []
+    },
+    {
+      "scenario": "restart_before_send",
+      "expected_reply_to": [],
+      "confirmed_reply_to": [],
+      "missed": [],
+      "silence_cases": 0,
+      "unwanted_interventions": [],
+      "attempts": [],
+      "turn_outcomes": [
+        "cancelled"
+      ]
+    },
+    {
+      "scenario": "ambiguous_send_and_restart",
+      "expected_reply_to": [],
+      "confirmed_reply_to": [],
+      "missed": [],
+      "silence_cases": 0,
+      "unwanted_interventions": [],
+      "attempts": [
+        [
+          0,
+          1,
+          "unknown"
+        ]
+      ],
+      "turn_outcomes": [
+        "unknown"
+      ]
+    }
+  ],
+  "human_votes": 0
+}
