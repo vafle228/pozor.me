@@ -230,6 +230,39 @@ async def test_429_then_stop_never_retries(scope):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response", [429, 403])
+async def test_source_erased_while_delivery_waits_for_telegram(scope, monkeypatch, response):
+    from pozor.infra.sqlite.privacy_repo import forget
+
+    pipeline, database, clock, bot, _ = scope
+    start(scope)
+    await generated(pipeline)
+    attempts = []
+
+    async def send(**kwargs):
+        attempts.append(kwargs["chat_id"])
+        forget(database, -1001, 42)
+        method = SendMessage(chat_id=-1001, text="test")
+        if response == 403:
+            raise TelegramForbiddenError(method=method, message="synthetic")
+        raise TelegramRetryAfter(method=method, message="synthetic", retry_after=1)
+
+    monkeypatch.setattr(bot, "send_message", send)
+    try:
+        assert await pipeline.send_once()
+        clock.now += 10
+        assert not await pipeline.send_once()
+        assert attempts == [-1001]
+        assert state(database, "turns") == []
+        assert state(database, "outbox") == []
+        with connect(database) as db:
+            enabled = db.execute("SELECT enabled FROM chats WHERE chat_id=-1001").fetchone()[0]
+            assert bool(enabled) == (response != 403)
+    finally:
+        await pipeline.aclose()
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_timeout_is_terminal(scope):
     p, db, clock, bot, _ = scope
     start(scope)
@@ -253,7 +286,7 @@ async def test_crash_after_telegram_success_before_commit(scope, monkeypatch):
     def crash(*args):
         raise RuntimeError("simulated process loss")
 
-    monkeypatch.setattr(p, "_finish_send", crash)
+    monkeypatch.setattr(p.outbox, "finish", crash)
     with pytest.raises(RuntimeError):
         await p.send_once()
     assert state(db)[0]["status"] == "sending"
@@ -767,8 +800,29 @@ async def test_queue_busy_before_start_does_not_open_session(scope):
 
 
 @pytest.mark.asyncio
+async def test_stop_jobs_leaves_shared_queue_available(scope):
+    p, _, _, bot, generator = scope
+    generator.release.clear()
+    start(scope)
+    try:
+        await asyncio.wait_for(generator.entered.wait(), 5)
+        await p.stop_jobs()
+        result = await p.queue.submit(
+            key="other-consumer",
+            chat_id=-2,
+            deadline=asyncio.get_running_loop().time() + 5,
+            factory=lambda _: asyncio.sleep(0, result="available"),
+        )
+        assert result == "available"
+        assert not await p.send_once()
+        assert not bot.calls
+    finally:
+        await p.aclose()
+
+
+@pytest.mark.asyncio
 async def test_retrieval_timeout_is_terminal(scope, monkeypatch):
-    from pozor.infra.sqlite import delivery
+    from pozor.infra.sqlite import turn_generation
 
     p, db, _, bot, generator = scope
     attempts = []
@@ -777,7 +831,7 @@ async def test_retrieval_timeout_is_terminal(scope, monkeypatch):
         attempts.append(1)
         raise TimeoutError
 
-    monkeypatch.setattr(delivery, "retrieve", timed_out)
+    monkeypatch.setattr(turn_generation, "retrieve", timed_out)
     start(scope)
     try:
         await asyncio.wait_for(generated(p), 2)

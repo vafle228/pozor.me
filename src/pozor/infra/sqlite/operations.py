@@ -79,7 +79,7 @@ def _snapshot(source: Path, destination: Path, *, recover: bool, allow_older: bo
             _validate(snapshot,allow_older=allow_older)
         if recover:
             # On a restored timeline no saved pending punch may be retried.
-            from pozor.infra.sqlite.delivery import recover_delivery
+            from pozor.infra.sqlite.delivery_state import recover_delivery
 
             recover_delivery(temporary)
             with closing(sqlite3.connect(temporary)) as snapshot:

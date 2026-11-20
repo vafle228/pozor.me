@@ -15,14 +15,16 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, TypeAdapter, model_validator
 
 from pozor.app.container import Container
+from pozor.app.delivery import DeliveryPipeline
 from pozor.config import Settings
 from pozor.core.domain.context import ContextPack, Contract
 from pozor.core.domain.generation import GeneratedRoast, GenerationResult
+from pozor.core.usecases.generate_turn import RoastGenerator
 from pozor.infra.config.registry import owner
 from pozor.infra.files.deployment import Deployment
 from pozor.infra.sqlite.command_store import observe
 from pozor.infra.sqlite.commands import set_chat_enabled, set_consent
-from pozor.infra.sqlite.delivery import DeliveryPipeline, RoastGenerator, recover_delivery
+from pozor.infra.sqlite.delivery_state import recover_delivery
 from pozor.infra.sqlite.health_repo import register_bot
 from pozor.infra.sqlite.ingestion import poll_once, sync_chat_allowlist
 from pozor.infra.sqlite.replay_repo import delivery_outcomes
@@ -229,7 +231,7 @@ class GroupReplay:
             try:
                 yield pipeline
             finally:
-                await pipeline.aclose()
+                await pipeline.stop_jobs()
                 await controls.aclose()
 
     def seed(self) -> None:

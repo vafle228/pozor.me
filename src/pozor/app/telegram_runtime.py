@@ -16,10 +16,11 @@ from aiogram.exceptions import TelegramConflictError
 from aiogram.types import BotCommand, BotCommandScopeAllGroupChats
 
 from pozor.app.auto_profiles import automatic_profile_loop
+from pozor.app.delivery import DeliveryPipeline, health_loop
 from pozor.config import Settings
 from pozor.infra.sqlite.commands import expire_sessions
 from pozor.infra.sqlite.connection import migrate
-from pozor.infra.sqlite.delivery import DeliveryPipeline, health_loop, recover_delivery
+from pozor.infra.sqlite.delivery_state import recover_delivery
 from pozor.infra.sqlite.ingestion import (
     PollingConflictError,
     run_poller,
@@ -122,7 +123,7 @@ async def run_telegram(settings: Settings, container: Container | None = None) -
         finally:
             for task in tasks:
                 task.cancel()
-            await pipeline.aclose()
+            await pipeline.stop_jobs()
             await controls.aclose()
             for task in tasks:
                 with suppress(asyncio.CancelledError):
