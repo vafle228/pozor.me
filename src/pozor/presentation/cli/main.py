@@ -5,6 +5,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from aiogram.exceptions import TelegramAPIError
@@ -65,6 +66,30 @@ def eval_results(chat: int, variant: str = 'B') -> None:
 def eval_retrieval(dataset: Path = Path('tests/fixtures/eval.jsonl')) -> None:
     from pozor.app.evaluation import benchmark
     typer.echo(json.dumps(asyncio.run(benchmark(dataset)),ensure_ascii=False))
+
+
+@eval_app.command('replay')
+def eval_replay(
+    output: Annotated[Path, typer.Option(help="Новый JSON-файл для результатов.")],
+    suite: Path = Path("tests/fixtures/conversation_replay.json"),
+    live: bool = typer.Option(False, "--live", help="Использовать локальную модель llama.cpp."),
+    port: int = typer.Option(18080, min=1, max=65535, help="Порт модели на 127.0.0.1."),
+) -> None:
+    """Проиграть синтетическую групповую беседу на временных БД с локальной доставкой."""
+    from pozor.app.conversation_replay import replay
+
+    if output.suffix.lower() != ".json" or output.exists():
+        raise typer.BadParameter("Укажите путь к новому JSON-файлу.", param_hint="--output")
+    try:
+        report = asyncio.run(replay(suite, live=live, port=port))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+    except (InferenceError, ValueError, OSError) as exc:
+        typer.echo(f"Replay failed: {exc}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"{report['mode']}: {len(report['scenarios'])} scenarios, {output}")
 
 
 @app.command("serve")
