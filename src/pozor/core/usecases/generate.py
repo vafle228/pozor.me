@@ -73,22 +73,33 @@ class Generator:
                         if attempt:
                             raise InferenceError('invalid_output:' + reason) from None
         except (InferenceError, InvalidOutput, TimeoutError) as exc:
-            reason = str(exc) if isinstance(exc, (InferenceError, InvalidOutput)) else "deadline"
-            logger.warning("llm_fallback reason=%s", reason)
-            if reason != "circuit_open" and not reason.startswith('invalid_output:'):
-                self.failures += 1
-                if self.failures >= 3:
-                    self.open_until = asyncio.get_running_loop().time() + 30
-            fallback=GeneratedRoast(text=DIALOGUE_FALLBACK if pack.mode == 'dialogue' else
-                FALLBACKS[int(hashlib.sha256(pack.trigger.text.encode()).hexdigest(),16)%len(FALLBACKS)]
-                if self.client.settings.humor_v2_enabled else FALLBACK,evidence_ids=[],angle='fallback')
-            return GenerationResult(
-                roast=address_roast(fallback,pack) if self.client.settings.humor_v2_enabled else fallback,
-                fallback=True, reason=reason,
-                candidates=exc.candidates if isinstance(exc,CandidateFailure) else [],
-                prompt_version='v2' if self.client.settings.humor_v2_enabled else 'v1',
-            )
+            return self.fallback_result(pack, exc)
         raise AssertionError("unreachable")
+
+    def fallback_result(
+        self, pack: ContextPack, exc: InferenceError | InvalidOutput | TimeoutError,
+    ) -> GenerationResult:
+        reason = str(exc) if isinstance(exc, (InferenceError, InvalidOutput)) else "deadline"
+        logger.warning("llm_fallback reason=%s", reason)
+        if reason != "circuit_open" and not reason.startswith("invalid_output:"):
+            self.failures += 1
+            if self.failures >= 3:
+                self.open_until = asyncio.get_running_loop().time() + 30
+        v2 = self.client.settings.humor_v2_enabled
+        text = FALLBACK
+        if pack.mode == "dialogue":
+            text = DIALOGUE_FALLBACK
+        elif v2:
+            digest = hashlib.sha256(pack.trigger.text.encode()).hexdigest()
+            text = FALLBACKS[int(digest, 16) % len(FALLBACKS)]
+        fallback = GeneratedRoast(text=text, evidence_ids=[], angle="fallback")
+        return GenerationResult(
+            roast=address_roast(fallback, pack) if v2 else fallback,
+            fallback=True,
+            reason=reason,
+            candidates=exc.candidates if isinstance(exc, CandidateFailure) else [],
+            prompt_version="v2" if v2 else "v1",
+        )
 
     async def dialogue(self, pack: ContextPack, deadline: float) -> GenerationResult:
         from pydantic import Field, ValidationError

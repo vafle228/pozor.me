@@ -3,7 +3,10 @@
 import asyncio
 import random
 import sqlite3
-from contextlib import suppress
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from typing import Any, Self
 
 from aiohttp import web
@@ -21,6 +24,73 @@ from pozor.infra.sqlite.admin_pipeline import AdminPipeline
 from pozor.infra.sqlite.admin_repo import AdminData
 from pozor.infra.sqlite.connection import migrate
 from pozor.presentation.admin.server import create_app
+
+
+def _model_queue(settings: Settings, client: LlamaClient) -> InferenceQueue:
+    return InferenceQueue(
+        client.wait_idle,
+        capacity=settings.queue_capacity,
+        background_capacity=settings.background_queue_capacity,
+        background_timeout=settings.background_timeout_seconds,
+    )
+
+
+class DiagnosticBusy(RuntimeError):
+    pass
+
+
+@asynccontextmanager
+async def standalone_inference(settings: Settings) -> AsyncIterator[tuple[LlamaClient, InferenceQueue]]:
+    """Own this installation during a model diagnostic without opening its database."""
+    lock = ProcessLock(settings.database_path)
+    try:
+        lock.acquire()
+    except ValueError:
+        raise DiagnosticBusy("Установка занята другим процессом Pozor.") from None
+    try:
+        async with LlamaClient(settings) as client:
+            queue = _model_queue(settings, client)
+            try:
+                yield client, queue
+            finally:
+                await queue.aclose()
+    finally:
+        lock.release()
+
+
+@dataclass(frozen=True)
+class DiagnosticGeneration:
+    result: GenerationResult
+    queue_wait_ms: float
+    generation_ms: float | None
+
+
+async def diagnostic_generation(
+    queue: InferenceQueue, generator: Generator, pack: ContextPack, deadline: float,
+) -> DiagnosticGeneration:
+    submitted = time.perf_counter()
+    started: float | None = None
+
+    async def generate(job_deadline: float) -> GenerationResult:
+        nonlocal started
+        started = time.perf_counter()
+        return await generator.generate(pack, job_deadline)
+
+    try:
+        result: GenerationResult = await queue.submit(
+            key=f"diagnostic:{pack.trigger.evidence_id}",
+            chat_id=pack.chat_id,
+            factory=generate,
+            deadline=deadline,
+        )
+    except (InferenceError, TimeoutError) as exc:
+        # The slot check can fail before the generator starts. Keep the same report and breaker.
+        circuit_open = asyncio.get_running_loop().time() < generator.open_until
+        result = generator.fallback_result(pack, InferenceError("circuit_open") if circuit_open else exc)
+    finished = time.perf_counter()
+    if started is None:
+        return DiagnosticGeneration(result, (finished - submitted) * 1000, None)
+    return DiagnosticGeneration(result, (started - submitted) * 1000, (finished - started) * 1000)
 
 
 class RequestGenerator:
@@ -49,8 +119,7 @@ class Container:
         self.prompts = FilePromptStore()
         self.generator = RequestGenerator(self.service,self.prompts)
         self.client = LlamaClient(settings)
-        self.queue = InferenceQueue(self.client.wait_idle,capacity=settings.queue_capacity,
-            background_capacity=settings.background_queue_capacity, background_timeout=settings.background_timeout_seconds)
+        self.queue = _model_queue(settings, self.client)
         self.admin = AdminPipeline(settings.database_path,settings,self.queue)
         self.runner: web.AppRunner | None = None
         self.settings_task: asyncio.Task[None] | None = None

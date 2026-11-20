@@ -81,6 +81,10 @@ async def analyze(database: Path, settings: Settings, chat: int, target: int,
                   progress: Any, *, since: datetime | None = None,
                   until: datetime | None = None, queue: InferenceQueue | None = None,
                   cumulative: bool = False) -> dict[str, Any]:
+    """Serve/admin and automatic refresh supply the installation's shared queue.
+
+    The optional direct path supports existing isolated callers of semantic_profiles.
+    """
     version, rows = await asyncio.to_thread(snapshot, database, chat, target, since, until)
     observations: list[dict[str, Any]] = []
     by_id = {r["id"]: r for r in rows}
