@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "dataset_version": "synthetic-contract-v1",
+  "selection": "Два вымышленных разговора и одна русская адаптация для проверки формата.",
+  "file": "examples.json",
+  "sha256_utf8_lf": "af970c84f39ec047e23c06770f83a5c8cbf4206a292baa6c72f02d36495313ea",
+  "counts": {
+    "examples": 3,
+    "conversations": 2,
+    "actions": {"speak": 2, "skip": 1},
+    "languages": {"en": 1, "ru": 2},
+    "human_annotations": 0
+  },
+  "rights": {
+    "fixture-only": {"basis": "project_synthetic_fixture", "uses": ["contract_check"]}
+  },
+  "splits": {
+    "fixture": ["synthetic/forecast", "synthetic/platform"]
+  }
+}

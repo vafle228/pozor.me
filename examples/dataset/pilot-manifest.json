@@ -1,0 +1,44 @@
+{
+  "version": "DATA-01-2026-11-20",
+  "purpose": "Оценка пригодности двух открытых источников для коротких русских реплик",
+  "split": "source_review",
+  "reviewer": "Codex",
+  "human_ratings": 0,
+  "training_examples_released": 0,
+  "samples": [
+    {
+      "dataset": "Russian Everyday Dialogues",
+      "author": "Ekaterina Myskina",
+      "repository": "https://huggingface.co/datasets/kukunechka/russian-everyday-dialogues",
+      "revision": "3d9c43ca85a50e7a32fa7b05e27c0637a710e988",
+      "file": "russian_everyday_dialogues.jsonl",
+      "sha256": "2599fe92d9f976e262f89b50dc5ec02b97bd2c3f2edad965b83d74e38ecd4169",
+      "license": "CC-BY-4.0",
+      "selection": "Полный файл без изменений. Порядок источника, по одной паре на id.",
+      "reviewed": 20,
+      "coherent_everyday_exchanges": 19,
+      "unclear_speaker_role": 1,
+      "contextual_comic_turn": 0
+    },
+    {
+      "dataset": "Russian Drama Corpus",
+      "editors": ["Frank Fischer", "Daniil Skorinkin"],
+      "author_of_selected_texts": "Антон Павлович Чехов",
+      "repository": "https://github.com/dracor-org/rusdracor",
+      "revision": "cb06b3a211cc36ed0806c9ae85a94ede5da99557",
+      "corpus_license": "CC0-1.0",
+      "digital_source_status_in_each_selected_tei": "In the public domain.",
+      "files": [
+        {"path": "tei/chekhov-medved.xml", "sha256": "5488d782a4920fbc41eb3d266038398ebcddacf5b3edbe2066a3bb6c61a99f71", "eligible": 109, "reviewed": 6},
+        {"path": "tei/chekhov-predlozhenie.xml", "sha256": "a7ef4aeaf76cc039ff3f7e057162e863bad260e6301f1bd67c47e360735e9d2b", "eligible": 156, "reviewed": 6},
+        {"path": "tei/chekhov-tragik-ponevole.xml", "sha256": "06956d5c6a76f6aab80d5645bf89a7b5589292d5359b0fc5c419d05ced9d9565", "eligible": 24, "reviewed": 6}
+      ],
+      "sample_keys_sha256_utf8_lf": "c26e24069ccab7823132b2dd8714421732c0b132307c80008147659fc2c4e497",
+      "reviewed": 18,
+      "three_distinct_speakers_in_window": 1,
+      "comic_mechanism_for_adaptation": 2,
+      "distinct_scenes_with_that_mechanism": 1,
+      "ready_for_unchanged_modern_chat": 0
+    }
+  ]
+}

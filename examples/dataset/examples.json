@@ -1,0 +1,43 @@
+[
+  {
+    "id": "forecast-en",
+    "conversation_id": "synthetic/forecast",
+    "language": "en",
+    "source": {"kind": "synthetic", "url": null, "rights_ref": "fixture-only"},
+    "creation": {"kind": "generated", "by": "Codex", "derived_from": []},
+    "context": [
+      {"id": "m1", "parent_id": null, "author": "A", "text": "I built a weather app."},
+      {"id": "m2", "parent_id": "m1", "author": "B", "text": "Does it know when it rains?"},
+      {"id": "m3", "parent_id": "m2", "author": "A", "text": "You tap a button when you get wet."}
+    ],
+    "response": {"action": "speak", "id": "m4", "parent_id": "m3", "author": "C", "text": "So I'm the weather station."},
+    "annotations": []
+  },
+  {
+    "id": "forecast-ru",
+    "conversation_id": "synthetic/forecast",
+    "language": "ru",
+    "source": {"kind": "synthetic", "url": null, "rights_ref": "fixture-only"},
+    "creation": {"kind": "adaptation", "by": "Codex", "derived_from": ["forecast-en"]},
+    "context": [
+      {"id": "m1", "parent_id": null, "author": "A", "text": "Написал приложение с прогнозом погоды."},
+      {"id": "m2", "parent_id": "m1", "author": "B", "text": "Дождь угадывает?"},
+      {"id": "m3", "parent_id": "m2", "author": "A", "text": "Там кнопка. Промок — нажал."}
+    ],
+    "response": {"action": "speak", "id": "m4", "parent_id": "m3", "author": "C", "text": "А оклад у метеостанции какой?"},
+    "annotations": []
+  },
+  {
+    "id": "platform-ru",
+    "conversation_id": "synthetic/platform",
+    "language": "ru",
+    "source": {"kind": "synthetic", "url": null, "rights_ref": "fixture-only"},
+    "creation": {"kind": "generated", "by": "Codex", "derived_from": []},
+    "context": [
+      {"id": "m1", "parent_id": null, "author": "A", "text": "Нас на третьем пути ждать?"},
+      {"id": "m2", "parent_id": "m1", "author": "B", "text": "На пятом. Уже вижу вас, машу."}
+    ],
+    "response": {"action": "skip"},
+    "annotations": []
+  }
+]
